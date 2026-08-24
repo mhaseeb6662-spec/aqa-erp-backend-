@@ -1,0 +1,34 @@
+name: Deploy Backend to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 187.127.219.118
+          username: root
+          password: ${{ secrets.VPS_PASSWORD || 'Acadmy@12345' }}
+          script: |
+            echo "Deploying latest Backend..."
+            if [ -d "/var/www/aqua-erp/backend-repo/.git" ]; then
+                cd /var/www/aqua-erp/backend-repo
+                git pull origin main
+            else
+                rm -rf /var/www/aqua-erp/backend-repo
+                git clone https://github.com/mhaseeb6662-spec/aqa-erp-backend-.git /var/www/aqua-erp/backend-repo
+            fi
+            cp -r /var/www/aqua-erp/backend-repo/* /var/www/aqua-erp/backend/
+            cd /var/www/aqua-erp/backend
+            npm install --production --no-audit
+            pm2 restart aqua-erp-backend
+            echo "Backend Deployment Complete!"
