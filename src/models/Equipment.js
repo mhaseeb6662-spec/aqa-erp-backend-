@@ -13,6 +13,12 @@ const equipmentSchema = new mongoose.Schema(
       default: 'ACADEMY_USE',
       index: true,
     },
+    code: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
     sku: {
       type: String,
       trim: true,

@@ -197,9 +197,11 @@ exports.createEquipment = async (req, res, next) => {
     const sellingPrice = Number(req.body.sellingPrice) || 0;
     const costPrice = Number(req.body.costPrice) || 0;
     const reorderLevel = Number(req.body.reorderLevel) || 5;
+    const code = req.body.code || req.body.sku || ('EQ-' + Math.floor(100000 + Math.random() * 900000));
 
     const eq = await Equipment.create({
       ...req.body,
+      code,
       inventoryType,
       totalQuantity: total,
       damagedQuantity: damaged,
