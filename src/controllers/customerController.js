@@ -233,8 +233,13 @@ exports.updateCustomer = catchAsync(async (req, res, next) => {
   const disallowed = ['originalLead', 'convertedAt', 'createdBy'];
   disallowed.forEach((field) => delete req.body[field]);
 
-  if (req.body.firstName || req.body.lastName) {
-    req.body.fullName = `${req.body.firstName || ''} ${req.body.lastName || ''}`.trim() || req.body.fullName;
+  const existing = await Customer.findById(req.params.id);
+  if (!existing) return next(new AppError('Customer not found.', 404));
+
+  if (req.body.firstName !== undefined || req.body.lastName !== undefined) {
+    const newFirst = req.body.firstName !== undefined ? req.body.firstName : (existing.firstName || '');
+    const newLast = req.body.lastName !== undefined ? req.body.lastName : (existing.lastName || '');
+    req.body.fullName = `${newFirst} ${newLast}`.trim() || existing.fullName;
   }
 
   const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, {
@@ -242,7 +247,6 @@ exports.updateCustomer = catchAsync(async (req, res, next) => {
     runValidators: true,
   }).populate('assignedTo', 'fullName email');
 
-  if (!customer) return next(new AppError('Customer not found.', 404));
   return sendResponse(res, 200, 'Customer updated successfully.', customer);
 });
 
