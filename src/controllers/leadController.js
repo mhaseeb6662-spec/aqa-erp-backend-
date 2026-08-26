@@ -85,19 +85,59 @@ exports.getLeads = catchAsync(async (req, res) => {
 
 /**
  * GET /api/v1/leads/pipeline
- * Unpaginated list of leads (all stages) for the Kanban pipeline board.
+ * List of leads (all stages) for the Kanban pipeline board with sorting & filtering.
  * Registered before "/:id" so it isn't swallowed by the id route.
  */
 exports.getPipeline = catchAsync(async (req, res) => {
-  const { assignedTo, stage } = req.query;
+  const { assignedTo, stage, source, search = '', sortBy = 'createdAt', sortOrder = 'desc', sort } = req.query;
 
   const filter = {};
   if (assignedTo) filter.assignedTo = assignedTo;
   if (stage) filter.stage = stage;
+  if (source) filter.source = source;
+  if (search) {
+    filter.$or = [
+      { fullName: { $regex: search, $options: 'i' } },
+      { phone: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+    ];
+  }
+
+  // Build validated sort object
+  const sortObj = {};
+  const allowedSortFields = {
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt',
+    fullName: 'fullName',
+    source: 'source',
+  };
+
+  let targetField = 'createdAt';
+  let targetDirection = -1;
+
+  if (sort) {
+    if (sort.startsWith('-')) {
+      const field = sort.slice(1);
+      if (allowedSortFields[field]) {
+        targetField = allowedSortFields[field];
+        targetDirection = -1;
+      }
+    } else {
+      if (allowedSortFields[sort]) {
+        targetField = allowedSortFields[sort];
+        targetDirection = 1;
+      }
+    }
+  } else if (sortBy && allowedSortFields[sortBy]) {
+    targetField = allowedSortFields[sortBy];
+    targetDirection = (String(sortOrder).toLowerCase() === 'asc' || String(sortOrder) === '1') ? 1 : -1;
+  }
+
+  sortObj[targetField] = targetDirection;
 
   const leads = await Lead.find(filter)
     .populate('assignedTo', 'fullName email')
-    .sort({ createdAt: -1 });
+    .sort(sortObj);
 
   return sendResponse(res, 200, 'Pipeline fetched successfully.', leads);
 });
