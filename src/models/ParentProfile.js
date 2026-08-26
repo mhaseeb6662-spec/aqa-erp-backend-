@@ -16,7 +16,7 @@ const parentProfileSchema = new mongoose.Schema(
     ],
     relationshipToStudent: {
       type: String,
-      enum: ['Mother', 'Father', 'Guardian', 'Other'],
+      enum: ['Mother', 'Father', 'Guardian', 'Parent', 'Other'],
       default: 'Parent',
     },
     emergencyPhone: {
