@@ -12,8 +12,13 @@ const AppError = require('../utils/appError');
 exports.getInvoices = async (req, res, next) => {
   try {
     const filter = {};
-    if (req.user.role?.slug === 'student' || req.user.role?.slug === 'parent') {
-      filter.customer = req.user.id;
+    if (req.user.role?.slug === 'student') {
+      filter.$or = [{ customer: req.user.id }, { student: req.user.id }];
+    } else if (req.user.role?.slug === 'parent') {
+      const ParentProfile = require('../models/ParentProfile');
+      const parentProfile = await ParentProfile.findOne({ user: req.user.id });
+      const childIds = parentProfile?.children || [];
+      filter.$or = [{ customer: req.user.id }, { student: { $in: childIds } }];
     }
     if (req.query.status) {
       filter.status = req.query.status;
@@ -39,14 +44,41 @@ exports.getInvoices = async (req, res, next) => {
 exports.getInvoiceById = async (req, res, next) => {
   try {
     const invoice = await Invoice.findById(req.params.id)
-      .populate('customer', 'fullName email phone branch')
-      .populate('student', 'fullName email')
-      .populate('program', 'title code price')
+      .populate('customer', 'fullName email phone branch address')
+      .populate('student', 'fullName email phone branch')
+      .populate('booking', 'bookingId sessionDate slotTime bookingType status')
+      .populate('program', 'title code price category duration')
       .populate('branch', 'name code city address phone email');
 
     if (!invoice) return next(new AppError('Invoice not found', 404));
 
-    res.status(200).json({ success: true, data: invoice });
+    // IDOR / Security check
+    if (req.user.role?.slug === 'student') {
+      const isOwner = String(invoice.customer?._id || invoice.customer) === String(req.user.id) ||
+                      String(invoice.student?._id || invoice.student) === String(req.user.id);
+      if (!isOwner) return next(new AppError('You do not have permission to view this invoice', 403));
+    } else if (req.user.role?.slug === 'parent') {
+      const ParentProfile = require('../models/ParentProfile');
+      const parentProfile = await ParentProfile.findOne({ user: req.user.id });
+      const childIds = (parentProfile?.children || []).map(id => String(id));
+      const isParent = String(invoice.customer?._id || invoice.customer) === String(req.user.id) ||
+                       childIds.includes(String(invoice.student?._id || invoice.student));
+      if (!isParent) return next(new AppError('You do not have permission to view this invoice', 403));
+    }
+
+    let studentCode = null;
+    if (invoice.student?._id) {
+      const StudentProfile = require('../models/StudentProfile');
+      const sProfile = await StudentProfile.findOne({ user: invoice.student._id });
+      if (sProfile) studentCode = sProfile.studentCode;
+    }
+
+    const invoiceData = invoice.toObject();
+    if (studentCode && invoiceData.student) {
+      invoiceData.student.studentCode = studentCode;
+    }
+
+    res.status(200).json({ success: true, data: invoiceData });
   } catch (err) {
     next(err);
   }
@@ -191,6 +223,8 @@ exports.processOnlinePayment = async (req, res, next) => {
     // Update linked booking and operations schedule
     const Booking = require('../models/Booking');
     const Schedule = require('../models/Schedule');
+    const EmailService = require('../integrations/EmailService');
+    const StudentProfile = require('../models/StudentProfile');
 
     let booking = null;
     if (invoice.booking) {
@@ -211,7 +245,20 @@ exports.processOnlinePayment = async (req, res, next) => {
       );
     }
 
-    // Notify user
+    // Populate full details for notifications and email receipt dispatch
+    const populatedInvoice = await Invoice.findById(invoice._id)
+      .populate('customer', 'fullName email phone')
+      .populate('student', 'fullName email phone')
+      .populate('program', 'title')
+      .populate('branch', 'name city');
+
+    let studentCode = null;
+    if (populatedInvoice?.student?._id) {
+      const sProfile = await StudentProfile.findOne({ user: populatedInvoice.student._id });
+      if (sProfile) studentCode = sProfile.studentCode;
+    }
+
+    // In-app notifications
     await Notification.create({
       recipient: req.user.id,
       title: 'Payment Successful',
@@ -220,9 +267,58 @@ exports.processOnlinePayment = async (req, res, next) => {
       link: '/finance/receipts',
     });
 
+    if (populatedInvoice.student?._id && String(populatedInvoice.student._id) !== String(req.user.id)) {
+      await Notification.create({
+        recipient: populatedInvoice.student._id,
+        title: 'Payment Confirmed',
+        message: `Payment of AED ${Number(payAmount).toLocaleString()} for your ${populatedInvoice.program?.title || 'Program'} has been confirmed. Receipt: ${receiptNumber}`,
+        type: 'booking_alert',
+        link: '/finance/receipts',
+      });
+    }
+
+    // Automatic Receipt Email Dispatch to registered Parent & Student
+    const recipients = [];
+    const parentEmail = populatedInvoice.customer?.email;
+    const studentEmail = populatedInvoice.student?.email;
+
+    if (parentEmail && parentEmail.includes('@')) {
+      recipients.push({ email: parentEmail, name: populatedInvoice.customer?.fullName || 'Valued Client' });
+    }
+    if (studentEmail && studentEmail.includes('@') && studentEmail.toLowerCase() !== parentEmail?.toLowerCase()) {
+      recipients.push({ email: studentEmail, name: populatedInvoice.student?.fullName || 'Student' });
+    }
+
+    for (const rec of recipients) {
+      try {
+        await EmailService.sendEmail({
+          to: rec.email,
+          subject: `Payment Receipt – Invoice ${invoice.invoiceNumber} – Aqua Fishing Academy`,
+          template: 'paymentReceipt',
+          data: {
+            recipientName: rec.name,
+            customerName: populatedInvoice.customer?.fullName || rec.name,
+            parentName: populatedInvoice.customer?.fullName,
+            studentName: populatedInvoice.student?.fullName || populatedInvoice.customer?.fullName,
+            studentCode: studentCode || '',
+            invoiceNumber: invoice.invoiceNumber,
+            receiptNumber,
+            programTitle: populatedInvoice.program?.title || 'Maritime & Fishing Academy Program',
+            branchName: populatedInvoice.branch?.name || 'Dubai Marina Branch',
+            amount: payAmount,
+            balanceDue: newBalanceDue,
+            paymentMethod: paymentMethod || 'Credit Card',
+            paymentDate: new Date().toLocaleDateString('en-AE', { day: 'numeric', month: 'short', year: 'numeric' }),
+          },
+        });
+      } catch (mailErr) {
+        console.warn(`[Payment] Automatic receipt email failed for ${rec.email}:`, mailErr.message);
+      }
+    }
+
     res.status(200).json({
       success: true,
-      message: 'Online payment processed successfully!',
+      message: 'Online payment processed successfully and receipt issued!',
       data: {
         transaction,
         receipt,

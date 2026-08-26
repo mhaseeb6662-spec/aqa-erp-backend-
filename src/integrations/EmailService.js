@@ -88,15 +88,59 @@ class EmailService {
 
       case 'paymentReceipt':
         bodyContent = `
-          <h2 style="color: #0f172a; font-size: 18px;">Official Payment Receipt</h2>
-          <p>Dear <strong>${this.escapeHtml(data.customerName)}</strong>,</p>
-          <p>We have successfully received your payment of <strong>AED ${Number(data.amount || 0).toLocaleString()}</strong>.</p>
-          <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 20px 0;">
-            <p style="margin: 0; font-size: 13px;"><strong>Receipt Number:</strong> ${this.escapeHtml(data.receiptNumber)}</p>
-            <p style="margin: 6px 0 0 0; font-size: 13px;"><strong>Invoice Reference:</strong> ${this.escapeHtml(data.invoiceNumber)}</p>
-            <p style="margin: 6px 0 0 0; font-size: 13px;"><strong>Payment Method:</strong> ${this.escapeHtml(data.paymentMethod || 'Online Gateway')}</p>
-            <p style="margin: 6px 0 0 0; font-size: 13px; color: #16a34a;"><strong>Status:</strong> COMPLETED &amp; RECONCILED</p>
+          <h2 style="color: #0f172a; font-size: 20px; margin-top: 0;">Official Payment Receipt</h2>
+          <p style="font-size: 14px; color: #334155;">Dear <strong>${this.escapeHtml(data.recipientName || data.customerName)}</strong>,</p>
+          <p style="font-size: 14px; color: #334155;">Thank you for your payment to <strong>Aqua Fishing Academy</strong>. Your transaction has been successfully processed and verified.</p>
+          
+          <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; margin: 20px 0;">
+            <table style="width: 100%; font-size: 13px; color: #334155; border-collapse: collapse;">
+              <tr>
+                <td style="padding: 5px 0; color: #64748b; width: 40%;"><strong>Receipt Number:</strong></td>
+                <td style="padding: 5px 0; font-family: monospace; font-weight: bold; color: #0f172a;">${this.escapeHtml(data.receiptNumber)}</td>
+              </tr>
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Invoice Reference:</strong></td>
+                <td style="padding: 5px 0; font-family: monospace; font-weight: bold; color: #0284c7;">${this.escapeHtml(data.invoiceNumber)}</td>
+              </tr>
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Student Name:</strong></td>
+                <td style="padding: 5px 0; font-weight: bold; color: #0f172a;">${this.escapeHtml(data.studentName || data.customerName)}${data.studentCode ? ` (${this.escapeHtml(data.studentCode)})` : ''}</td>
+              </tr>
+              ${data.parentName && data.parentName !== data.studentName ? `
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Parent / Guardian:</strong></td>
+                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.parentName)}</td>
+              </tr>` : ''}
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Program / Class:</strong></td>
+                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.programTitle || 'Academy Training')}</td>
+              </tr>
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Branch Location:</strong></td>
+                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.branchName || 'Dubai Marina')}</td>
+              </tr>
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Payment Method:</strong></td>
+                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.paymentMethod || 'Credit Card')}</td>
+              </tr>
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Payment Date:</strong></td>
+                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.paymentDate || new Date().toLocaleDateString('en-AE'))}</td>
+              </tr>
+              <tr style="border-top: 1px solid #e2e8f0;">
+                <td style="padding: 10px 0 5px 0; color: #16a34a; font-size: 14px;"><strong>Amount Paid:</strong></td>
+                <td style="padding: 10px 0 5px 0; font-size: 16px; font-weight: 800; color: #16a34a;">AED ${Number(data.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+              </tr>
+              <tr>
+                <td style="padding: 5px 0; color: #64748b;"><strong>Remaining Balance Due:</strong></td>
+                <td style="padding: 5px 0; font-weight: bold; color: ${Number(data.balanceDue) > 0 ? '#d97706' : '#64748b'};">AED ${Number(data.balanceDue || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+              </tr>
+            </table>
           </div>
+          
+          <p style="font-size: 13px; color: #64748b; margin-top: 16px;">
+            This receipt serves as official proof of payment. You can also view and download your full invoices and payment receipts anytime via the <a href="${config.clientUrl || 'https://aquafishinghub.com'}/finance/receipts" style="color: #0284c7; font-weight: bold; text-decoration: none;">Aqua Fishing Academy Portal</a>.
+          </p>
         `;
         break;
 
