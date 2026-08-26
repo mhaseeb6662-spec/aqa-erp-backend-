@@ -10,6 +10,7 @@ router.get('/profile', studentProfileController.getStudentProfile);
 router.put('/profile', studentProfileController.updateStudentProfile);
 
 router.get('/all', restrictTo('super-admin', 'admin', 'management', 'operations-manager', 'coach', 'instructor', 'head-coach'), studentProfileController.getAllStudents);
+router.post('/migrate', restrictTo('super-admin', 'admin'), studentProfileController.migrateStudents);
 router.get('/profile/:userId', studentProfileController.getStudentProfile);
 router.put('/profile/:userId', studentProfileController.updateStudentProfile);
 

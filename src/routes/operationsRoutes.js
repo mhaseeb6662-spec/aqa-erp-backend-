@@ -21,7 +21,10 @@ router.route('/vessels/:id')
   .put(requirePermission(PERMISSIONS.OPERATIONS_FLEET_MANAGE), operationsController.updateVessel)
   .delete(requirePermission(PERMISSIONS.OPERATIONS_FLEET_MANAGE), operationsController.deleteVessel);
 
-// Equipment
+// Equipment & Inventory
+router.get('/equipment/metrics', requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_VIEW), operationsController.getInventoryMetrics);
+router.post('/equipment/:id/movement', requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), operationsController.adjustEquipmentStock);
+
 router.route('/equipment')
   .get(requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_VIEW), operationsController.getAllEquipment)
   .post(requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), operationsController.createEquipment);

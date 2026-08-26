@@ -97,12 +97,89 @@ exports.getOperationsDashboard = async (req, res, next) => {
   }
 };
 
-// --- Equipment Management ---
+// --- Equipment & Inventory Management ---
 
 exports.getAllEquipment = async (req, res, next) => {
   try {
-    const equipment = await Equipment.find().populate('branch', 'name code').sort({ createdAt: -1 });
+    const filter = {};
+
+    if (req.query.inventoryType) {
+      filter.inventoryType = req.query.inventoryType;
+    }
+    if (req.query.category && req.query.category !== 'All') {
+      filter.category = req.query.category;
+    }
+    if (req.query.branch) {
+      filter.branch = req.query.branch;
+    }
+    if (req.query.status && req.query.status !== 'All') {
+      filter.status = req.query.status;
+    }
+    if (req.query.search) {
+      filter.$or = [
+        { name: { $regex: req.query.search, $options: 'i' } },
+        { sku: { $regex: req.query.search, $options: 'i' } },
+        { category: { $regex: req.query.search, $options: 'i' } },
+      ];
+    }
+
+    const equipment = await Equipment.find(filter)
+      .populate('branch', 'name code city')
+      .sort({ createdAt: -1 });
+
     res.status(200).json({ success: true, count: equipment.length, data: equipment });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getInventoryMetrics = async (req, res, next) => {
+  try {
+    const allItems = await Equipment.find();
+
+    const academyItems = allItems.filter((i) => (i.inventoryType || 'ACADEMY_USE') === 'ACADEMY_USE');
+    const merchandiseItems = allItems.filter((i) => i.inventoryType === 'MERCHANDISE_FOR_SALE');
+
+    // Academy Use metrics
+    const academyTotalGear = academyItems.reduce((acc, i) => acc + (i.totalQuantity || 0), 0);
+    const academyAvailable = academyItems.reduce((acc, i) => acc + (i.availableQuantity || 0), 0);
+    const academyInUse = academyItems.reduce((acc, i) => acc + (i.inUseQuantity || 0), 0);
+    const academyDamaged = academyItems.reduce((acc, i) => acc + (i.damagedQuantity || 0), 0);
+    const academyUnderRepair = academyItems.reduce((acc, i) => acc + (i.underRepairQuantity || 0), 0);
+
+    // Merchandise metrics
+    const merchTotalStock = merchandiseItems.reduce((acc, i) => acc + (i.totalQuantity || 0), 0);
+    const merchAvailable = merchandiseItems.reduce((acc, i) => acc + (i.availableQuantity || 0), 0);
+    const merchSold = merchandiseItems.reduce((acc, i) => acc + (i.soldQuantity || 0), 0);
+    const merchInventoryValue = merchandiseItems.reduce(
+      (acc, i) => acc + (i.availableQuantity || 0) * (i.sellingPrice || 0),
+      0
+    );
+    const merchLowStockCount = merchandiseItems.filter(
+      (i) => (i.availableQuantity || 0) <= (i.reorderLevel || 5)
+    ).length;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        academy: {
+          totalGear: academyTotalGear,
+          available: academyAvailable,
+          inUse: academyInUse,
+          damaged: academyDamaged,
+          underRepair: academyUnderRepair,
+          itemCount: academyItems.length,
+        },
+        merchandise: {
+          totalStock: merchTotalStock,
+          availableForSale: merchAvailable,
+          sold: merchSold,
+          inventoryRetailValue: merchInventoryValue,
+          lowStockCount: merchLowStockCount,
+          productCount: merchandiseItems.length,
+        },
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -112,17 +189,30 @@ exports.createEquipment = async (req, res, next) => {
   try {
     const total = Number(req.body.totalQuantity) || 0;
     const damaged = Number(req.body.damagedQuantity) || 0;
+    const inUse = Number(req.body.inUseQuantity) || 0;
     const reserved = Number(req.body.reservedQuantity) || 0;
-    const available = total - damaged - reserved;
+    const available = Math.max(0, total - damaged - inUse - reserved);
+
+    const inventoryType = req.body.inventoryType || 'ACADEMY_USE';
+    const sellingPrice = Number(req.body.sellingPrice) || 0;
+    const costPrice = Number(req.body.costPrice) || 0;
+    const reorderLevel = Number(req.body.reorderLevel) || 5;
 
     const eq = await Equipment.create({
       ...req.body,
+      inventoryType,
       totalQuantity: total,
       damagedQuantity: damaged,
+      inUseQuantity: inUse,
       reservedQuantity: reserved,
-      availableQuantity: req.body.availableQuantity !== undefined ? Number(req.body.availableQuantity) : Math.max(0, available),
+      availableQuantity: req.body.availableQuantity !== undefined ? Number(req.body.availableQuantity) : available,
+      sellingPrice,
+      costPrice,
+      reorderLevel,
+      status: available === 0 ? 'Out of Stock' : available <= reorderLevel ? 'Low Stock' : 'Active',
     });
-    const populated = await Equipment.findById(eq._id).populate('branch', 'name code');
+
+    const populated = await Equipment.findById(eq._id).populate('branch', 'name code city');
     res.status(201).json({ success: true, data: populated });
   } catch (err) {
     next(err);
@@ -131,16 +221,103 @@ exports.createEquipment = async (req, res, next) => {
 
 exports.updateEquipment = async (req, res, next) => {
   try {
-    if (req.body.totalQuantity !== undefined && req.body.availableQuantity === undefined) {
-      const total = Number(req.body.totalQuantity) || 0;
-      const damaged = Number(req.body.damagedQuantity) || 0;
-      const reserved = Number(req.body.reservedQuantity) || 0;
-      req.body.availableQuantity = Math.max(0, total - damaged - reserved);
+    const item = await Equipment.findById(req.params.id);
+    if (!item) return next(new AppError('Equipment/Merchandise item not found', 404));
+
+    const total = req.body.totalQuantity !== undefined ? Number(req.body.totalQuantity) : item.totalQuantity;
+    const damaged = req.body.damagedQuantity !== undefined ? Number(req.body.damagedQuantity) : item.damagedQuantity;
+    const inUse = req.body.inUseQuantity !== undefined ? Number(req.body.inUseQuantity) : (item.inUseQuantity || 0);
+    const reserved = req.body.reservedQuantity !== undefined ? Number(req.body.reservedQuantity) : item.reservedQuantity;
+    const reorderLevel = req.body.reorderLevel !== undefined ? Number(req.body.reorderLevel) : (item.reorderLevel || 5);
+
+    const available = Math.max(0, total - damaged - inUse - reserved);
+
+    const updatePayload = {
+      ...req.body,
+      totalQuantity: total,
+      damagedQuantity: damaged,
+      inUseQuantity: inUse,
+      reservedQuantity: reserved,
+      availableQuantity: req.body.availableQuantity !== undefined ? Number(req.body.availableQuantity) : available,
+      status: available === 0 ? 'Out of Stock' : available <= reorderLevel ? 'Low Stock' : (req.body.status || item.status || 'Active'),
+    };
+
+    const eq = await Equipment.findByIdAndUpdate(req.params.id, updatePayload, {
+      new: true,
+      runValidators: true,
+    }).populate('branch', 'name code city');
+
+    res.status(200).json({ success: true, data: eq });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.adjustEquipmentStock = async (req, res, next) => {
+  try {
+    const { action, quantity = 1, notes } = req.body;
+    const item = await Equipment.findById(req.params.id);
+    if (!item) return next(new AppError('Inventory item not found', 404));
+
+    const qty = Number(quantity) || 1;
+
+    switch (action) {
+      case 'mark_damaged':
+        if (item.availableQuantity < qty) {
+          return next(new AppError(`Cannot mark ${qty} as damaged; only ${item.availableQuantity} available`, 400));
+        }
+        item.availableQuantity = Math.max(0, item.availableQuantity - qty);
+        item.damagedQuantity = (item.damagedQuantity || 0) + qty;
+        break;
+
+      case 'repair_restore':
+        if (item.damagedQuantity < qty) {
+          return next(new AppError(`Cannot restore ${qty}; only ${item.damagedQuantity} recorded as damaged`, 400));
+        }
+        item.damagedQuantity = Math.max(0, item.damagedQuantity - qty);
+        item.availableQuantity = item.availableQuantity + qty;
+        break;
+
+      case 'issue_gear':
+        if (item.availableQuantity < qty) {
+          return next(new AppError(`Cannot issue ${qty}; only ${item.availableQuantity} available`, 400));
+        }
+        item.availableQuantity = Math.max(0, item.availableQuantity - qty);
+        item.inUseQuantity = (item.inUseQuantity || 0) + qty;
+        break;
+
+      case 'return_gear':
+        if ((item.inUseQuantity || 0) < qty) {
+          return next(new AppError(`Cannot return ${qty}; only ${item.inUseQuantity || 0} currently in use`, 400));
+        }
+        item.inUseQuantity = Math.max(0, (item.inUseQuantity || 0) - qty);
+        item.availableQuantity = item.availableQuantity + qty;
+        break;
+
+      case 'record_sale':
+        if (item.availableQuantity < qty) {
+          return next(new AppError(`Insufficient stock to sell ${qty} units; only ${item.availableQuantity} in stock`, 400));
+        }
+        item.availableQuantity = Math.max(0, item.availableQuantity - qty);
+        item.soldQuantity = (item.soldQuantity || 0) + qty;
+        item.totalQuantity = Math.max(0, item.totalQuantity - qty);
+        break;
+
+      case 'restock':
+        item.totalQuantity = item.totalQuantity + qty;
+        item.availableQuantity = item.availableQuantity + qty;
+        break;
+
+      default:
+        return next(new AppError('Invalid movement action', 400));
     }
 
-    const eq = await Equipment.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true }).populate('branch', 'name code');
-    if (!eq) return next(new AppError('Equipment item not found', 404));
-    res.status(200).json({ success: true, data: eq });
+    item.status = item.availableQuantity === 0 ? 'Out of Stock' : item.availableQuantity <= (item.reorderLevel || 5) ? 'Low Stock' : 'Active';
+    if (notes) item.notes = notes;
+    await item.save();
+
+    const populated = await Equipment.findById(item._id).populate('branch', 'name code city');
+    res.status(200).json({ success: true, message: `Stock movement (${action}) completed`, data: populated });
   } catch (err) {
     next(err);
   }

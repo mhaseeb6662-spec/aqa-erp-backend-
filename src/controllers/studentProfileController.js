@@ -121,10 +121,197 @@ exports.getAllStudents = async (req, res, next) => {
     const students = await StudentProfile.find()
       .populate('user', 'fullName email phone branch status')
       .populate('parentUser', 'fullName email phone')
-      .populate('primaryBranch', 'name code')
+      .populate('primaryBranch', 'name code city')
       .sort({ createdAt: -1 });
 
     res.status(200).json({ success: true, count: students.length, data: students });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// 4. Bulk Migrate / Import Students
+exports.migrateStudents = async (req, res, next) => {
+  try {
+    const { students = [], dryRun = false } = req.body;
+
+    if (!Array.isArray(students) || students.length === 0) {
+      return next(new AppError('Please provide an array of student records to migrate.', 400));
+    }
+
+    const studentRole = await Role.findOne({ slug: 'student' });
+    const parentRole = await Role.findOne({ slug: 'parent' });
+    const defaultBranch = await Branch.findOne();
+    const allBranches = await Branch.find();
+    const allPrograms = await Program.find();
+
+    const summary = {
+      totalRecords: students.length,
+      isDryRun: Boolean(dryRun),
+      validCount: 0,
+      importedCount: 0,
+      duplicateCount: 0,
+      rejectedCount: 0,
+      errors: [],
+      importedSamples: [],
+      duplicates: [],
+    };
+
+    for (let i = 0; i < students.length; i++) {
+      const row = students[i];
+      const rowNum = i + 1;
+      const fullName = (row.fullName || row.studentName || row.name || '').trim();
+      const email = (row.email || row.studentEmail || '').trim().toLowerCase();
+      const phone = (row.phone || row.studentPhone || '').trim();
+      const legacyId = (row.legacyStudentId || row.studentCode || row.studentId || '').trim();
+      const parentName = (row.parentName || row.guardianName || '').trim();
+      const parentEmail = (row.parentEmail || row.guardianEmail || '').trim().toLowerCase();
+      const parentPhone = (row.parentPhone || row.guardianPhone || '').trim();
+
+      // Basic Validation
+      if (!fullName) {
+        summary.rejectedCount++;
+        summary.errors.push({ row: rowNum, error: 'Missing Student Name', data: row });
+        continue;
+      }
+
+      // Generate or normalize email if missing
+      const studentEmail = email || `student_${legacyId ? legacyId.toLowerCase().replace(/[^a-z0-9]/g, '') : Date.now() + '_' + i}@aquafishing.academy`;
+
+      // Check Duplicate by Email or Legacy ID
+      const existingUser = await User.findOne({ email: studentEmail });
+      let existingProfile = null;
+      if (legacyId) {
+        existingProfile = await StudentProfile.findOne({ studentCode: legacyId });
+      }
+
+      if (existingUser || existingProfile) {
+        summary.duplicateCount++;
+        summary.duplicates.push({
+          row: rowNum,
+          studentName: fullName,
+          email: studentEmail,
+          legacyId: legacyId || existingProfile?.studentCode,
+          reason: existingUser ? 'Email already registered' : 'Student Code already exists',
+        });
+        continue;
+      }
+
+      // Branch Mapping
+      let branchId = defaultBranch?._id;
+      if (row.branch || row.branchName) {
+        const queryBranch = String(row.branch || row.branchName).toLowerCase();
+        const matched = allBranches.find(
+          (b) => b.name.toLowerCase().includes(queryBranch) || b.city?.toLowerCase().includes(queryBranch) || (b.code && b.code.toLowerCase() === queryBranch)
+        );
+        if (matched) branchId = matched._id;
+      }
+
+      // Program Mapping
+      const enrolledProgramIds = [];
+      if (row.program || row.programName || row.enrolledProgram) {
+        const queryProg = String(row.program || row.programName || row.enrolledProgram).toLowerCase();
+        const matchedProg = allPrograms.find(
+          (p) => p.title.toLowerCase().includes(queryProg) || (p.code && p.code.toLowerCase() === queryProg)
+        );
+        if (matchedProg) enrolledProgramIds.push(matchedProg._id);
+      }
+
+      summary.validCount++;
+
+      // If dry run, do not write to database
+      if (dryRun) {
+        if (summary.importedSamples.length < 5) {
+          summary.importedSamples.push({
+            row: rowNum,
+            fullName,
+            email: studentEmail,
+            studentCode: legacyId || 'AUTO-GENERATED',
+            parentName: parentName || 'N/A',
+            branch: branchId,
+          });
+        }
+        continue;
+      }
+
+      // 1. Resolve or Create Parent
+      let parentUserId = null;
+      if (parentEmail) {
+        let parentUser = await User.findOne({ email: parentEmail });
+        if (!parentUser) {
+          parentUser = await User.create({
+            fullName: parentName || `${fullName}'s Parent`,
+            email: parentEmail,
+            phone: parentPhone || '',
+            role: parentRole?._id,
+            branch: branchId,
+            password: 'Password@12345',
+          });
+          await ParentProfile.create({
+            user: parentUser._id,
+            children: [],
+          });
+        }
+        parentUserId = parentUser._id;
+      }
+
+      // 2. Create Student User
+      const studentUser = await User.create({
+        fullName,
+        email: studentEmail,
+        phone: phone || '',
+        role: studentRole?._id,
+        branch: branchId,
+        password: 'Student@12345',
+      });
+
+      // 3. Create Student Profile
+      const studentCode = legacyId || 'STU-' + Math.floor(100000 + Math.random() * 900000);
+      const studentProfile = await StudentProfile.create({
+        user: studentUser._id,
+        parentUser: parentUserId,
+        studentCode,
+        dateOfBirth: row.dateOfBirth ? new Date(row.dateOfBirth) : null,
+        gender: row.gender && ['Male', 'Female', 'Other'].includes(row.gender) ? row.gender : 'Prefer not to say',
+        skillLevel: row.skillLevel && ['Beginner', 'Intermediate', 'Advanced', 'Master'].includes(row.skillLevel) ? row.skillLevel : 'Beginner',
+        primaryBranch: branchId,
+        enrolledPrograms: enrolledProgramIds,
+        emergencyContact: {
+          name: row.emergencyContactName || parentName || '',
+          phone: row.emergencyContactPhone || parentPhone || phone || '',
+          relationship: row.emergencyRelationship || 'Parent/Guardian',
+        },
+        medicalNotes: row.medicalNotes || 'No known restrictions.',
+        dietaryNotes: row.dietaryNotes || 'Standard diet.',
+      });
+
+      // Link child to parent
+      if (parentUserId) {
+        await ParentProfile.findOneAndUpdate(
+          { user: parentUserId },
+          { $addToSet: { children: studentUser._id } }
+        );
+      }
+
+      summary.importedCount++;
+      if (summary.importedSamples.length < 5) {
+        summary.importedSamples.push({
+          id: studentProfile._id,
+          studentCode,
+          fullName,
+          email: studentEmail,
+          parentLinked: Boolean(parentUserId),
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: dryRun
+        ? `Migration Dry-Run complete: ${summary.validCount} valid records, ${summary.duplicateCount} duplicates, ${summary.rejectedCount} rejected.`
+        : `Migration successfully imported ${summary.importedCount} students (${summary.duplicateCount} duplicates skipped, ${summary.rejectedCount} rejected).`,
+      data: summary,
+    });
   } catch (err) {
     next(err);
   }
