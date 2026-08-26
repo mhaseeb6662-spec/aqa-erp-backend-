@@ -24,13 +24,17 @@ const paymentTransactionSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['Credit Card', 'Debit Card', 'Stripe Gateway', 'PayPal', 'Bank Transfer', 'Cash', 'Apple Pay', 'Google Pay', 'Online Gateway'],
+      enum: ['Credit Card', 'Debit Card', 'Physical Card / POS Machine', 'Cash', 'Bank Transfer', 'Online Payment', 'Stripe Gateway', 'PayPal', 'Apple Pay', 'Google Pay', 'Online Gateway'],
       default: 'Credit Card',
     },
     status: {
       type: String,
       enum: ['Completed', 'Pending', 'Failed', 'Refunded', 'Partially Refunded'],
       default: 'Completed',
+    },
+    approvalCode: {
+      type: String,
+      default: '',
     },
     gatewayReference: {
       type: String,
@@ -40,13 +44,40 @@ const paymentTransactionSchema = new mongoose.Schema(
       type: String,
       default: '4242',
     },
+    evidenceUrl: {
+      type: String,
+      default: '',
+    },
+    evidenceMetadata: {
+      uploadedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null,
+      },
+      uploadedAt: {
+        type: Date,
+        default: null,
+      },
+      fileName: {
+        type: String,
+        default: '',
+      },
+      mimeType: {
+        type: String,
+        default: '',
+      },
+      fileSize: {
+        type: Number,
+        default: 0,
+      },
+    },
     paidAt: {
       type: Date,
       default: Date.now,
     },
     notes: {
       type: String,
-      default: 'Online payment processed successfully.',
+      default: 'Payment processed successfully.',
     },
     recordedBy: {
       type: mongoose.Schema.Types.ObjectId,

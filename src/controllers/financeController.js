@@ -331,6 +331,298 @@ exports.processOnlinePayment = async (req, res, next) => {
   }
 };
 
+// ---- Record Payment (Physical Card / POS Machine, Cash, Bank Transfer, Online) ----
+exports.recordPayment = async (req, res, next) => {
+  try {
+    const {
+      invoiceId,
+      amount,
+      paymentMethod,
+      paymentDate,
+      approvalCode,
+      evidenceUrl,
+      evidenceMetadata,
+      notes,
+    } = req.body;
+
+    const invoice = await Invoice.findById(invoiceId);
+    if (!invoice) return next(new AppError('Invoice not found', 404));
+
+    const payAmount = Number(amount);
+    if (!payAmount || payAmount <= 0) {
+      return next(new AppError('Payment amount must be greater than 0', 400));
+    }
+
+    if (payAmount > invoice.balanceDue) {
+      return next(
+        new AppError(
+          `Payment amount (AED ${payAmount.toFixed(2)}) exceeds outstanding balance (AED ${invoice.balanceDue.toFixed(2)})`,
+          400
+        )
+      );
+    }
+
+    const transactionId = 'TXN-' + Math.floor(100000 + Math.random() * 900000);
+    const receiptNumber = 'RCT-' + Math.floor(100000 + Math.random() * 900000);
+
+    const transaction = await PaymentTransaction.create({
+      transactionId,
+      invoice: invoice._id,
+      customer: invoice.customer,
+      amount: payAmount,
+      paymentMethod: paymentMethod || 'Physical Card / POS Machine',
+      approvalCode: approvalCode || '',
+      evidenceUrl: evidenceUrl || '',
+      evidenceMetadata: evidenceUrl
+        ? {
+            uploadedBy: req.user.id,
+            uploadedAt: new Date(),
+            fileName: evidenceMetadata?.fileName || 'pos_receipt.jpg',
+            mimeType: evidenceMetadata?.mimeType || 'image/jpeg',
+            fileSize: evidenceMetadata?.fileSize || 0,
+          }
+        : undefined,
+      status: 'Completed',
+      paidAt: paymentDate ? new Date(paymentDate) : new Date(),
+      notes: notes || `Manual payment recorded via ${paymentMethod || 'POS Machine'}.`,
+      recordedBy: req.user.id,
+    });
+
+    // Update invoice paid amounts and status
+    const newAmountPaid = invoice.amountPaid + payAmount;
+    const newBalanceDue = Math.max(0, invoice.totalAmount - newAmountPaid);
+    const newStatus = newBalanceDue === 0 ? 'Paid' : 'Partially Paid';
+
+    invoice.amountPaid = newAmountPaid;
+    invoice.balanceDue = newBalanceDue;
+    invoice.status = newStatus;
+    await invoice.save();
+
+    // Generate Official Receipt
+    const receipt = await Receipt.create({
+      receiptNumber,
+      payment: transaction._id,
+      invoice: invoice._id,
+      customer: invoice.customer,
+      amountPaid: payAmount,
+      paymentMethod: paymentMethod || 'Physical Card / POS Machine',
+      notes: `Official Payment Receipt - ${paymentMethod || 'Physical Card / POS Machine'}`,
+      issuedAt: paymentDate ? new Date(paymentDate) : new Date(),
+    });
+
+    // Update linked booking and operations schedule
+    const Booking = require('../models/Booking');
+    const Schedule = require('../models/Schedule');
+    const EmailService = require('../integrations/EmailService');
+    const StudentProfile = require('../models/StudentProfile');
+    const Activity = require('../models/Activity');
+
+    let booking = null;
+    if (invoice.booking) {
+      booking = await Booking.findById(invoice.booking);
+    } else {
+      booking = await Booking.findOne({ invoice: invoice._id });
+    }
+
+    if (booking) {
+      booking.paymentStatus = newStatus === 'Paid' ? 'Paid' : 'Partially Paid';
+      booking.status = 'Confirmed';
+      await booking.save();
+
+      await Schedule.updateMany(
+        { booking: booking._id },
+        { status: 'Scheduled' }
+      );
+    }
+
+    // Populate for notifications and receipt email dispatch
+    const populatedInvoice = await Invoice.findById(invoice._id)
+      .populate('customer', 'fullName email phone')
+      .populate('student', 'fullName email phone')
+      .populate('program', 'title')
+      .populate('branch', 'name city');
+
+    let studentCode = null;
+    if (populatedInvoice?.student?._id) {
+      const sProfile = await StudentProfile.findOne({ user: populatedInvoice.student._id });
+      if (sProfile) studentCode = sProfile.studentCode;
+    }
+
+    // Log audit activity
+    try {
+      await Activity.create({
+        entityType: 'Customer',
+        entityId: invoice.customer,
+        type: 'status_change',
+        description: `Recorded ${paymentMethod || 'POS'} payment of AED ${payAmount.toFixed(2)} for Invoice ${invoice.invoiceNumber}. Receipt: ${receiptNumber}`,
+        performedBy: req.user.id,
+        metadata: {
+          invoiceId: invoice._id,
+          invoiceNumber: invoice.invoiceNumber,
+          transactionId,
+          receiptNumber,
+          amount: payAmount,
+          paymentMethod: paymentMethod || 'Physical Card / POS Machine',
+          hasEvidence: Boolean(evidenceUrl),
+        },
+      });
+    } catch (auditErr) {
+      console.warn('[Activity Audit] Failed to log payment activity:', auditErr.message);
+    }
+
+    // In-app notifications
+    await Notification.create({
+      recipient: invoice.customer,
+      title: 'Payment Recorded',
+      message: `Payment of AED ${payAmount.toLocaleString()} for Invoice ${invoice.invoiceNumber} was recorded via ${paymentMethod || 'POS Machine'}. Receipt: ${receiptNumber}`,
+      type: 'booking_alert',
+      link: '/finance/receipts',
+    });
+
+    if (populatedInvoice.student?._id && String(populatedInvoice.student._id) !== String(invoice.customer)) {
+      await Notification.create({
+        recipient: populatedInvoice.student._id,
+        title: 'Payment Confirmed',
+        message: `Payment of AED ${payAmount.toLocaleString()} for ${populatedInvoice.program?.title || 'your program'} was confirmed. Receipt: ${receiptNumber}`,
+        type: 'booking_alert',
+        link: '/finance/receipts',
+      });
+    }
+
+    // Automatic Receipt Email Dispatch
+    const recipients = [];
+    const parentEmail = populatedInvoice.customer?.email;
+    const studentEmail = populatedInvoice.student?.email;
+
+    if (parentEmail && parentEmail.includes('@')) {
+      recipients.push({ email: parentEmail, name: populatedInvoice.customer?.fullName || 'Valued Client' });
+    }
+    if (studentEmail && studentEmail.includes('@') && studentEmail.toLowerCase() !== parentEmail?.toLowerCase()) {
+      recipients.push({ email: studentEmail, name: populatedInvoice.student?.fullName || 'Student' });
+    }
+
+    for (const rec of recipients) {
+      try {
+        await EmailService.sendEmail({
+          to: rec.email,
+          subject: `Payment Receipt – Invoice ${invoice.invoiceNumber} – Aqua Fishing Academy`,
+          template: 'paymentReceipt',
+          data: {
+            recipientName: rec.name,
+            customerName: populatedInvoice.customer?.fullName || rec.name,
+            parentName: populatedInvoice.customer?.fullName,
+            studentName: populatedInvoice.student?.fullName || populatedInvoice.customer?.fullName,
+            studentCode: studentCode || '',
+            invoiceNumber: invoice.invoiceNumber,
+            receiptNumber,
+            programTitle: populatedInvoice.program?.title || 'Maritime & Fishing Academy Program',
+            branchName: populatedInvoice.branch?.name || 'Dubai Marina Branch',
+            amount: payAmount,
+            balanceDue: newBalanceDue,
+            paymentMethod: paymentMethod || 'Physical Card / POS Machine',
+            paymentDate: new Date().toLocaleDateString('en-AE', { day: 'numeric', month: 'short', year: 'numeric' }),
+          },
+        });
+      } catch (mailErr) {
+        console.warn(`[Payment] Automatic receipt email failed for ${rec.email}:`, mailErr.message);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment recorded successfully and receipt issued!',
+      data: {
+        transaction,
+        receipt,
+        invoiceStatus: newStatus,
+        balanceDue: newBalanceDue,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ---- Administrative Status Override ----
+exports.overrideInvoiceStatus = async (req, res, next) => {
+  try {
+    const { status, reason } = req.body;
+    if (!status) return next(new AppError('Please specify the new invoice status', 400));
+    if (!reason || !reason.trim()) {
+      return next(new AppError('A valid administrative reason is required for status override', 400));
+    }
+
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) return next(new AppError('Invoice not found', 404));
+
+    const oldStatus = invoice.status;
+    invoice.status = status;
+    await invoice.save();
+
+    // Audit the status override
+    const Activity = require('../models/Activity');
+    try {
+      await Activity.create({
+        entityType: 'Customer',
+        entityId: invoice.customer,
+        type: 'status_change',
+        description: `Administrative Invoice Status Override for ${invoice.invoiceNumber}: from "${oldStatus}" to "${status}". Reason: ${reason}`,
+        performedBy: req.user.id,
+        metadata: {
+          invoiceId: invoice._id,
+          invoiceNumber: invoice.invoiceNumber,
+          oldStatus,
+          newStatus: status,
+          reason,
+          overriddenAt: new Date(),
+        },
+      });
+    } catch (auditErr) {
+      console.warn('[Activity Audit] Failed to log status override:', auditErr.message);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Invoice status overridden from ${oldStatus} to ${status}`,
+      data: invoice,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ---- View Payment Evidence ----
+exports.getPaymentEvidence = async (req, res, next) => {
+  try {
+    const payment = await PaymentTransaction.findById(req.params.id)
+      .populate('recordedBy', 'fullName email role')
+      .populate('customer', 'fullName email')
+      .populate('invoice', 'invoiceNumber totalAmount');
+
+    if (!payment) return next(new AppError('Payment transaction not found', 404));
+
+    if (!payment.evidenceUrl) {
+      return next(new AppError('No receipt photo evidence recorded for this payment', 404));
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        transactionId: payment.transactionId,
+        paymentMethod: payment.paymentMethod,
+        amount: payment.amount,
+        approvalCode: payment.approvalCode,
+        evidenceUrl: payment.evidenceUrl,
+        evidenceMetadata: payment.evidenceMetadata,
+        recordedBy: payment.recordedBy,
+        paidAt: payment.paidAt,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.getPayments = async (req, res, next) => {
   try {
     const filter = {};
@@ -340,6 +632,7 @@ exports.getPayments = async (req, res, next) => {
 
     const payments = await PaymentTransaction.find(filter)
       .populate('customer', 'fullName email')
+      .populate('recordedBy', 'fullName email')
       .populate('invoice', 'invoiceNumber totalAmount status')
       .sort({ paidAt: -1 });
 

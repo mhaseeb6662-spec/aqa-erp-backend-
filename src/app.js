@@ -73,13 +73,13 @@ app.use('/api/v1/webhooks/leads', webhookLimiter);
 // (signatures are computed over the exact raw body, not the parsed object).
 app.use(
   express.json({
-    limit: '10kb',
+    limit: '15mb',
     verify: (req, res, buf) => {
       req.rawBody = buf;
     },
   })
 );
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(cookieParser());
 
 // ---- Sanitization against NoSQL injection & XSS ----

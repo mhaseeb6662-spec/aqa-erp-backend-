@@ -22,7 +22,10 @@ router.post('/invoices/:id/reminder', requirePermission(PERMISSIONS.FINANCE_INVO
 
 // Online Payment Integration & Checkout
 router.post('/checkout', requirePermission(PERMISSIONS.FINANCE_PAYMENTS_PROCESS, PERMISSIONS.FINANCE_INVOICES_VIEW), financeController.processOnlinePayment);
+router.post('/record-payment', requirePermission(PERMISSIONS.FINANCE_PAYMENTS_PROCESS, PERMISSIONS.FINANCE_INVOICES_UPDATE, PERMISSIONS.PAYMENTS_CREATE), financeController.recordPayment);
+router.patch('/invoices/:id/status-override', requirePermission(PERMISSIONS.FINANCE_INVOICES_UPDATE, PERMISSIONS.FINANCE_INVOICES_CREATE), financeController.overrideInvoiceStatus);
 router.get('/payments', requirePermission(PERMISSIONS.FINANCE_PAYMENTS_VIEW), financeController.getPayments);
+router.get('/payments/:id/evidence', requirePermission(PERMISSIONS.FINANCE_PAYMENTS_VIEW, PERMISSIONS.FINANCE_INVOICES_VIEW), financeController.getPaymentEvidence);
 
 // Refunds
 router
