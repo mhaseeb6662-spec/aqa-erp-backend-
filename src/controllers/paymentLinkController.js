@@ -47,7 +47,7 @@ exports.generatePaymentLink = catchAsync(async (req, res, next) => {
     entityType: 'customer',
     entityId: customerId,
     type: 'payment_link',
-    description: `Payment link generated for Rs. ${Number(amount).toLocaleString()} — ${description}`,
+    description: `Payment link generated for AED ${Number(amount).toLocaleString()} — ${description}`,
     performedBy: req.user._id,
   });
 

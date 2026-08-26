@@ -104,7 +104,7 @@ exports.createInvoice = async (req, res, next) => {
     await Notification.create({
       recipient: customerId,
       title: 'New Invoice Issued',
-      message: `Invoice ${invoiceNumber} for $${totalAmount} USD has been generated for your account.`,
+      message: `Invoice ${invoiceNumber} for AED ${Number(totalAmount).toLocaleString()} has been generated for your account.`,
       type: 'system',
       link: '/finance/invoices',
     });
@@ -127,7 +127,7 @@ exports.sendInvoiceReminder = async (req, res, next) => {
     await Notification.create({
       recipient: invoice.customer._id,
       title: 'Payment Reminder',
-      message: `Reminder: Invoice ${invoice.invoiceNumber} ($${invoice.balanceDue} USD due) is outstanding. Please complete payment.`,
+      message: `Reminder: Invoice ${invoice.invoiceNumber} (AED ${Number(invoice.balanceDue).toLocaleString()} due) is outstanding. Please complete payment.`,
       type: 'booking_alert',
       link: '/finance/invoices',
     });
@@ -215,7 +215,7 @@ exports.processOnlinePayment = async (req, res, next) => {
     await Notification.create({
       recipient: req.user.id,
       title: 'Payment Successful',
-      message: `Your payment of $${payAmount} USD for Invoice ${invoice.invoiceNumber} was processed successfully. Receipt: ${receiptNumber}`,
+      message: `Your payment of AED ${Number(payAmount).toLocaleString()} for Invoice ${invoice.invoiceNumber} was processed successfully. Receipt: ${receiptNumber}`,
       type: 'booking_alert',
       link: '/finance/receipts',
     });
@@ -294,7 +294,7 @@ exports.processRefund = async (req, res, next) => {
     await Notification.create({
       recipient: payment.customer,
       title: 'Refund Processed',
-      message: `A refund of $${refundAmount} USD has been processed for transaction ${payment.transactionId}.`,
+      message: `A refund of AED ${Number(refundAmount).toLocaleString()} has been processed for transaction ${payment.transactionId}.`,
       type: 'system',
       link: '/finance/refunds',
     });
