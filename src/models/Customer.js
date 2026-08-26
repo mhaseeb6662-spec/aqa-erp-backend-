@@ -5,6 +5,16 @@ const { LEAD_SOURCES } = require('../config/crm.constants');
 // reference back to the originating lead so full history can be traced.
 const customerSchema = new mongoose.Schema(
   {
+    firstName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    lastName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     fullName: {
       type: String,
       required: [true, 'Full name is required'],
@@ -22,10 +32,98 @@ const customerSchema = new mongoose.Schema(
       required: [true, 'Phone number is required'],
       trim: true,
     },
+    dateOfBirth: {
+      type: Date,
+      default: null,
+    },
+    gender: {
+      type: String,
+      enum: ['Male', 'Female', 'Other', 'Prefer not to say'],
+      default: 'Prefer not to say',
+    },
+    nationality: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Emirates ID Document
+    emiratesIdUrl: {
+      type: String,
+      default: '',
+    },
+    emiratesIdMetadata: {
+      fileName: { type: String, default: '' },
+      fileSize: { type: Number, default: 0 },
+      mimeType: { type: String, default: '' },
+      uploadedAt: { type: Date, default: Date.now },
+    },
+    // Full Address
+    streetAddress: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    country: {
+      type: String,
+      trim: true,
+      default: 'United Arab Emirates',
+    },
+    city: {
+      type: String,
+      trim: true,
+      default: 'Dubai',
+    },
+    state: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    zipCode: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Parent / Guardian
+    parentFullName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    parentEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: '',
+    },
+    parentPhone: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    parentRelationship: {
+      type: String,
+      enum: ['Father', 'Mother', 'Guardian', 'Other'],
+      default: 'Guardian',
+    },
+    // Behavioural / Attention Needs
+    hasBehaviouralNeeds: {
+      type: Boolean,
+      default: false,
+    },
+    behaviouralNeedsDetails: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Consent
+    socialMediaConsent: {
+      type: Boolean,
+      default: true,
+    },
+    // Lead / Referral Source
     source: {
       type: String,
-      enum: LEAD_SOURCES,
-      default: 'Other',
+      default: 'Social Media',
     },
     interestedIn: {
       type: String,
@@ -64,6 +162,13 @@ const customerSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+customerSchema.pre('save', function (next) {
+  if (this.firstName || this.lastName) {
+    this.fullName = `${this.firstName || ''} ${this.lastName || ''}`.trim() || this.fullName;
+  }
+  next();
+});
 
 customerSchema.index({ fullName: 'text', phone: 'text', email: 'text' });
 customerSchema.index({ assignedTo: 1 });

@@ -2,6 +2,10 @@ const Customer = require('../models/Customer');
 const FollowUp = require('../models/FollowUp');
 const Activity = require('../models/Activity');
 const PaymentLink = require('../models/PaymentLink');
+const User = require('../models/User');
+const Role = require('../models/Role');
+const StudentProfile = require('../models/StudentProfile');
+const ParentProfile = require('../models/ParentProfile');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const sendResponse = require('../utils/apiResponse');
@@ -20,6 +24,9 @@ exports.getCustomers = catchAsync(async (req, res) => {
       { fullName: { $regex: search, $options: 'i' } },
       { phone: { $regex: search, $options: 'i' } },
       { email: { $regex: search, $options: 'i' } },
+      { parentFullName: { $regex: search, $options: 'i' } },
+      { parentEmail: { $regex: search, $options: 'i' } },
+      { parentPhone: { $regex: search, $options: 'i' } },
     ];
   }
   if (assignedTo) filter.assignedTo = assignedTo;
@@ -31,7 +38,7 @@ exports.getCustomers = catchAsync(async (req, res) => {
   const [customers, total] = await Promise.all([
     Customer.find(filter)
       .populate('assignedTo', 'fullName email')
-      .sort({ convertedAt: -1 })
+      .sort({ convertedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limitNum),
     Customer.countDocuments(filter),
@@ -47,28 +54,165 @@ exports.getCustomers = catchAsync(async (req, res) => {
 
 /**
  * POST /api/v1/customers
- * Direct student add — for when a student/child needs to be added straight
- * to the roster (e.g. from the Calendar's "new class" form) without going
- * through the Lead -> Convert flow. `originalLead` stays null for these.
+ * Complete student registration form supporting all client template fields,
+ * automatic parent matching/linking, and Student Profile synchronization.
  */
 exports.createCustomer = catchAsync(async (req, res, next) => {
-  const { fullName, email, phone, source, interestedIn, notes, assignedTo } = req.body;
+  const {
+    firstName = '',
+    lastName = '',
+    phone,
+    email = '',
+    dateOfBirth,
+    gender,
+    nationality = '',
+    emiratesIdUrl = '',
+    emiratesIdMetadata = {},
+    streetAddress = '',
+    country = 'United Arab Emirates',
+    city = 'Dubai',
+    state = '',
+    zipCode = '',
+    parentFullName = '',
+    parentEmail = '',
+    parentPhone = '',
+    parentRelationship = 'Guardian',
+    hasBehaviouralNeeds = false,
+    behaviouralNeedsDetails = '',
+    socialMediaConsent = true,
+    source = 'Social Media',
+    interestedIn = '',
+    notes = '',
+    assignedTo,
+  } = req.body;
 
-  if (!fullName || !phone) {
-    return next(new AppError('Full name and phone number are required.', 400));
+  const resolvedFullName = (firstName && lastName)
+    ? `${firstName.trim()} ${lastName.trim()}`
+    : (req.body.fullName || firstName || lastName || '').trim();
+
+  if (!resolvedFullName || !phone) {
+    return next(new AppError('Student name and contact phone number are required.', 400));
   }
 
+  // 1. Resolve or Create Parent account if parent email provided
+  let parentUserId = null;
+  const pEmail = (parentEmail || '').trim().toLowerCase();
+  const pPhone = (parentPhone || '').trim();
+  const pName = (parentFullName || '').trim();
+
+  if (pEmail) {
+    let parentUser = await User.findOne({ email: pEmail });
+    if (!parentUser) {
+      const parentRole = await Role.findOne({ slug: 'parent' });
+      parentUser = await User.create({
+        fullName: pName || `${resolvedFullName}'s Parent`,
+        email: pEmail,
+        phone: pPhone,
+        role: parentRole?._id,
+        password: 'Password@12345',
+        status: 'active',
+      });
+      await ParentProfile.create({
+        user: parentUser._id,
+        relationshipToStudent: parentRelationship || 'Parent',
+        children: [],
+      });
+    }
+    parentUserId = parentUser._id;
+  }
+
+  // 2. Create Customer record in CRM
   const customer = await Customer.create({
-    fullName,
-    email,
-    phone,
+    firstName: firstName.trim(),
+    lastName: lastName.trim(),
+    fullName: resolvedFullName,
+    email: email.trim().toLowerCase(),
+    phone: phone.trim(),
+    dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+    gender: gender || 'Prefer not to say',
+    nationality: nationality.trim(),
+    emiratesIdUrl,
+    emiratesIdMetadata,
+    streetAddress: streetAddress.trim(),
+    country: country.trim(),
+    city: city.trim(),
+    state: state.trim(),
+    zipCode: zipCode.trim(),
+    parentFullName: pName,
+    parentEmail: pEmail,
+    parentPhone: pPhone,
+    parentRelationship,
+    hasBehaviouralNeeds: Boolean(hasBehaviouralNeeds),
+    behaviouralNeedsDetails: hasBehaviouralNeeds ? (behaviouralNeedsDetails || '').trim() : '',
+    socialMediaConsent: Boolean(socialMediaConsent),
     source,
-    interestedIn,
-    notes,
+    interestedIn: interestedIn.trim(),
+    notes: notes.trim(),
     assignedTo: assignedTo || null,
     originalLead: null,
-    createdBy: req.user._id,
+    createdBy: req.user?._id || null,
   });
+
+  // 3. Create or Link Student Portal User & Profile
+  const sEmail = (email || '').trim().toLowerCase();
+  if (sEmail) {
+    let studentUser = await User.findOne({ email: sEmail });
+    if (!studentUser) {
+      const studentRole = await Role.findOne({ slug: 'student' });
+      studentUser = await User.create({
+        fullName: resolvedFullName,
+        email: sEmail,
+        phone: phone.trim(),
+        role: studentRole?._id,
+        password: 'Student@12345',
+        status: 'active',
+      });
+
+      const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
+      await StudentProfile.create({
+        user: studentUser._id,
+        parentUser: parentUserId,
+        studentCode,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+        gender: gender || 'Prefer not to say',
+        nationality: nationality.trim(),
+        emiratesIdUrl,
+        emiratesIdMetadata,
+        streetAddress: streetAddress.trim(),
+        country: country.trim(),
+        city: city.trim(),
+        state: state.trim(),
+        zipCode: zipCode.trim(),
+        hasBehaviouralNeeds: Boolean(hasBehaviouralNeeds),
+        behaviouralNeedsDetails: hasBehaviouralNeeds ? (behaviouralNeedsDetails || '').trim() : '',
+        socialMediaConsent: Boolean(socialMediaConsent),
+        hearAboutUs: source,
+      });
+
+      if (parentUserId) {
+        await ParentProfile.findOneAndUpdate(
+          { user: parentUserId },
+          { $addToSet: { children: studentUser._id } }
+        );
+      }
+    }
+  }
+
+  // 4. Audit Activity Log
+  try {
+    await Activity.create({
+      action: 'STUDENT_CREATED',
+      entityType: 'customer',
+      entityId: customer._id,
+      title: 'New Student Registered',
+      description: `Registered student ${resolvedFullName} with parent ${pName || 'N/A'}.`,
+      performedBy: req.user?._id || null,
+    });
+  } catch (auditErr) {
+    console.error('Activity audit log warning:', auditErr);
+  }
 
   return sendResponse(res, 201, 'Student added successfully.', customer);
 });
@@ -88,6 +232,10 @@ exports.getCustomer = catchAsync(async (req, res, next) => {
 exports.updateCustomer = catchAsync(async (req, res, next) => {
   const disallowed = ['originalLead', 'convertedAt', 'createdBy'];
   disallowed.forEach((field) => delete req.body[field]);
+
+  if (req.body.firstName || req.body.lastName) {
+    req.body.fullName = `${req.body.firstName || ''} ${req.body.lastName || ''}`.trim() || req.body.fullName;
+  }
 
   const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, {
     new: true,

@@ -61,9 +61,80 @@ const studentProfileSchema = new mongoose.Schema(
         ref: 'Program',
       },
     ],
+    firstName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    lastName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    nationality: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Emirates ID Document
+    emiratesIdUrl: {
+      type: String,
+      default: '',
+    },
+    emiratesIdMetadata: {
+      fileName: { type: String, default: '' },
+      fileSize: { type: Number, default: 0 },
+      mimeType: { type: String, default: '' },
+      uploadedAt: { type: Date, default: Date.now },
+    },
+    // Full Address
+    streetAddress: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    country: {
+      type: String,
+      trim: true,
+      default: 'United Arab Emirates',
+    },
+    city: {
+      type: String,
+      trim: true,
+      default: 'Dubai',
+    },
+    state: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    zipCode: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Behavioural / Attention Needs
+    hasBehaviouralNeeds: {
+      type: Boolean,
+      default: false,
+    },
+    behaviouralNeedsDetails: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Consent
+    socialMediaConsent: {
+      type: Boolean,
+      default: true,
+    },
     mediaConsent: {
       type: Boolean,
       default: true,
+    },
+    hearAboutUs: {
+      type: String,
+      default: 'Social Media',
     },
     waiverSigned: {
       type: Boolean,
