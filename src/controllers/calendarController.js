@@ -7,10 +7,29 @@ const Branch = require('../models/Branch');
 const Schedule = require('../models/Schedule');
 const Booking = require('../models/Booking');
 const Invoice = require('../models/Invoice');
+const Subject = require('../models/Subject');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const sendResponse = require('../utils/apiResponse');
 const { CALENDAR_SUBJECT_OPTIONS } = require('../config/crm.constants');
+
+function addMinutesToTime(timeStr, minutes) {
+  if (!timeStr || !timeStr.includes(':')) return '';
+  const [h, m] = timeStr.split(':').map(Number);
+  const totalMins = (h * 60 + m + Number(minutes)) % (24 * 60);
+  const newH = Math.floor(totalMins / 60);
+  const newM = totalMins % 60;
+  return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}`;
+}
+
+function calculateMinutesDiff(startTime, endTime) {
+  if (!startTime || !endTime || !startTime.includes(':') || !endTime.includes(':')) return 60;
+  const [h1, m1] = startTime.split(':').map(Number);
+  const [h2, m2] = endTime.split(':').map(Number);
+  let diff = (h2 * 60 + m2) - (h1 * 60 + m1);
+  if (diff < 0) diff += 24 * 60;
+  return diff > 0 ? diff : 60;
+}
 
 const POPULATE_FIELDS = [
   { path: 'lead', select: 'fullName phone email source stage' },
@@ -458,12 +477,18 @@ exports.getLocationOptions = catchAsync(async (req, res) => {
  * GET /api/v1/calendar/subjects
  */
 exports.getSubjectOptions = catchAsync(async (req, res) => {
-  const dbSubjects = await CalendarEvent.distinct('subject');
-  const combined = Array.from(new Set([...CALENDAR_SUBJECT_OPTIONS, ...dbSubjects]))
-    .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b));
+  const activeSubjects = await Subject.find({ status: { $ne: 'archived' } }).sort({ sortOrder: 1, name: 1 });
+  let combinedNames;
+  if (activeSubjects.length > 0) {
+    combinedNames = activeSubjects.map(s => s.name);
+  } else {
+    const dbSubjects = await CalendarEvent.distinct('subject');
+    combinedNames = Array.from(new Set([...CALENDAR_SUBJECT_OPTIONS, ...dbSubjects]))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+  }
 
-  return sendResponse(res, 200, 'Subject options fetched successfully.', combined);
+  return sendResponse(res, 200, 'Subject options fetched successfully.', combinedNames);
 });
 
 /**
@@ -485,6 +510,7 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
     type = 'class',
     eventType = 'one-time',
     subject = '',
+    durationMinutes,
     title,
     program,
     branch,
@@ -507,6 +533,22 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
 
   if (!date) return next(new AppError('Date is required.', 400));
   if (!startTime) return next(new AppError('Start time is required.', 400));
+
+  // Find linked Subject or default duration
+  let subjectDoc = null;
+  if (subject) {
+    subjectDoc = await Subject.findOne({ name: { $regex: new RegExp(`^${subject.trim()}$`, 'i') } });
+  }
+
+  // Determine duration and end time
+  let finalDuration = durationMinutes ? Number(durationMinutes) : (subjectDoc?.defaultDuration || 60);
+  let finalEndTime = endTime;
+
+  if (!finalEndTime && startTime && finalDuration) {
+    finalEndTime = addMinutesToTime(startTime, finalDuration);
+  } else if (startTime && finalEndTime && !durationMinutes) {
+    finalDuration = calculateMinutesDiff(startTime, finalEndTime);
+  }
 
   let autoTitle = title;
   let leadDoc = null;
@@ -543,7 +585,9 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
   const event = await CalendarEvent.create({
     type,
     eventType,
-    subject,
+    subject: subject ? subject.trim() : '',
+    subjectId: subjectDoc?._id || null,
+    durationMinutes: finalDuration,
     title: autoTitle,
     program: program || null,
     branch: branch || null,
@@ -551,7 +595,7 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
     internalNotes,
     date: parseUtcDate(date),
     startTime,
-    endTime: endTime || '',
+    endTime: finalEndTime || '',
     lead: lead || null,
     student: student || null,
     teacher: primaryTeacher,
@@ -581,6 +625,19 @@ exports.updateCalendarEvent = catchAsync(async (req, res, next) => {
 
   if (req.body.date) {
     req.body.date = parseUtcDate(req.body.date);
+  }
+
+  if (req.body.subject) {
+    const subjectDoc = await Subject.findOne({ name: { $regex: new RegExp(`^${req.body.subject.trim()}$`, 'i') } });
+    if (subjectDoc) {
+      req.body.subjectId = subjectDoc._id;
+    }
+  }
+
+  if (req.body.startTime && req.body.durationMinutes && !req.body.endTime) {
+    req.body.endTime = addMinutesToTime(req.body.startTime, Number(req.body.durationMinutes));
+  } else if (req.body.startTime && req.body.endTime && !req.body.durationMinutes) {
+    req.body.durationMinutes = calculateMinutesDiff(req.body.startTime, req.body.endTime);
   }
 
   if (req.body.teachers && Array.isArray(req.body.teachers)) {

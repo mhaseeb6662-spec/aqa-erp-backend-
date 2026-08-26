@@ -68,6 +68,17 @@ const calendarEventSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    subjectId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Subject',
+      default: null,
+    },
+    durationMinutes: {
+      type: Number,
+      default: 60,
+      min: 5,
+      max: 1440,
+    },
     title: {
       type: String,
       trim: true,
