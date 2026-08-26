@@ -66,6 +66,11 @@ const programSchema = new mongoose.Schema(
       type: String,
       default: 'None',
     },
+    calendarColor: {
+      type: String,
+      enum: ['blue', 'teal', 'emerald', 'rose', 'amber', 'purple', 'indigo'],
+      default: 'blue',
+    },
   },
   { timestamps: true }
 );

@@ -121,6 +121,16 @@ const calendarEventSchema = new mongoose.Schema(
         ref: 'User',
       },
     ],
+    program: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Program',
+      default: null,
+    },
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+    },
     isOnline: {
       type: Boolean,
       default: false,

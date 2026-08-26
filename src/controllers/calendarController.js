@@ -2,6 +2,11 @@ const CalendarEvent = require('../models/CalendarEvent');
 const Lead = require('../models/Lead');
 const Customer = require('../models/Customer');
 const User = require('../models/User');
+const Program = require('../models/Program');
+const Branch = require('../models/Branch');
+const Schedule = require('../models/Schedule');
+const Booking = require('../models/Booking');
+const Invoice = require('../models/Invoice');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const sendResponse = require('../utils/apiResponse');
@@ -12,10 +17,27 @@ const POPULATE_FIELDS = [
   { path: 'student', select: 'fullName phone email' },
   { path: 'teacher', select: 'fullName email branch' },
   { path: 'teachers', select: 'fullName email branch' },
+  { path: 'program', select: 'title code category level price calendarColor durationWeeks sessionsCount' },
+  { path: 'branch', select: 'name code city address' },
   { path: 'createdBy', select: 'fullName email' },
   { path: 'registrations.lead', select: 'fullName phone email source stage' },
   { path: 'registrations.student', select: 'fullName phone email' },
 ];
+
+const CATEGORY_COLOR_MAP = {
+  'Fishing Essentials': 'blue',
+  'Offshore & Deep Sea': 'emerald',
+  'Kayak & Boating': 'teal',
+  'Junior Angler': 'rose',
+  'Spearfishing & Diving': 'purple',
+  'Custom Private': 'amber',
+};
+
+const getCategoryColor = (category, programColor) => {
+  if (programColor) return programColor;
+  if (!category) return 'blue';
+  return CATEGORY_COLOR_MAP[category] || 'blue';
+};
 
 const toDayStart = (value) => {
   if (!value) return new Date();
@@ -46,6 +68,240 @@ const parseUtcDate = (value) => {
     return new Date(`${dateStr}T00:00:00.000Z`);
   }
   return new Date(value);
+};
+
+/**
+ * Helper to enrich calendar events with:
+ * 1. Matching Program data and Color Theme
+ * 2. Automated Financial / Invoice / Payment calculations
+ */
+const enrichEventsWithFinancials = async (events) => {
+  if (!events || events.length === 0) return [];
+
+  // 1. Fetch all programs to match subject/title if program ref isn't set
+  const allPrograms = await Program.find().lean();
+  const programMapById = new Map();
+  const programMapByTitle = new Map();
+  const programMapByCategory = new Map();
+
+  allPrograms.forEach((p) => {
+    programMapById.set(String(p._id), p);
+    if (p.title) programMapByTitle.set(p.title.trim().toLowerCase(), p);
+    if (p.code) programMapByTitle.set(p.code.trim().toLowerCase(), p);
+    if (p.category) {
+      if (!programMapByCategory.has(p.category.trim().toLowerCase())) {
+        programMapByCategory.set(p.category.trim().toLowerCase(), p);
+      }
+    }
+  });
+
+  // 2. Collect all student/customer/lead IDs to batch query Invoices & Bookings
+  const studentIds = new Set();
+  const leadIds = new Set();
+
+  events.forEach((ev) => {
+    if (ev.student) studentIds.add(String(ev.student._id || ev.student));
+    if (ev.lead) leadIds.add(String(ev.lead._id || ev.lead));
+    if (Array.isArray(ev.registrations)) {
+      ev.registrations.forEach((r) => {
+        if (r.student) studentIds.add(String(r.student._id || r.student));
+        if (r.lead) leadIds.add(String(r.lead._id || r.lead));
+      });
+    }
+  });
+
+  // Query Invoices for all involved students / customers
+  const invoiceQuery = [];
+  if (studentIds.size > 0) {
+    const sIdList = Array.from(studentIds);
+    invoiceQuery.push({ student: { $in: sIdList } });
+    invoiceQuery.push({ customer: { $in: sIdList } });
+  }
+
+  let invoices = [];
+  if (invoiceQuery.length > 0) {
+    invoices = await Invoice.find({ $or: invoiceQuery })
+      .select('invoiceNumber student customer booking program totalAmount amountPaid balanceDue status dueDate createdAt')
+      .lean();
+  }
+
+  // Map invoices by student and program/booking
+  const invoicesByStudent = new Map();
+  invoices.forEach((inv) => {
+    const sKey = String(inv.student || inv.customer);
+    if (!invoicesByStudent.has(sKey)) invoicesByStudent.set(sKey, []);
+    invoicesByStudent.get(sKey).push(inv);
+  });
+
+  // 3. Process each event
+  const enriched = events.map((eventObj) => {
+    const ev = eventObj.toObject ? eventObj.toObject() : { ...eventObj };
+
+    // Resolve Program
+    let matchedProgram = null;
+    if (ev.program) {
+      matchedProgram = typeof ev.program === 'object' ? ev.program : programMapById.get(String(ev.program));
+    }
+    if (!matchedProgram && ev.subject) {
+      const subKey = ev.subject.trim().toLowerCase();
+      matchedProgram = programMapByTitle.get(subKey) || programMapByCategory.get(subKey);
+    }
+    if (!matchedProgram && ev.title) {
+      const titleKey = ev.title.trim().toLowerCase();
+      matchedProgram = programMapByTitle.get(titleKey);
+      if (!matchedProgram) {
+        for (const [pTitle, pObj] of programMapByTitle.entries()) {
+          if (titleKey.includes(pTitle) || pTitle.includes(titleKey)) {
+            matchedProgram = pObj;
+            break;
+          }
+        }
+      }
+    }
+
+    const programCategory = matchedProgram?.category || ev.subject || 'Fishing Essentials';
+    const calendarColor = getCategoryColor(programCategory, matchedProgram?.calendarColor);
+
+    ev.programDetails = {
+      _id: matchedProgram?._id || null,
+      title: matchedProgram?.title || ev.title || 'Academy Program',
+      code: matchedProgram?.code || 'PROG',
+      category: programCategory,
+      level: matchedProgram?.level || 'All Levels',
+      calendarColor,
+      price: matchedProgram?.price || 0,
+      durationWeeks: matchedProgram?.durationWeeks || 4,
+      sessionsCount: matchedProgram?.sessionsCount || 8,
+    };
+
+    // Calculate duration in hours
+    let durationMinutes = 120; // default 2 hours
+    if (ev.startTime && ev.endTime) {
+      const [sh, sm] = ev.startTime.split(':').map(Number);
+      const [eh, em] = ev.endTime.split(':').map(Number);
+      if (!isNaN(sh) && !isNaN(eh)) {
+        durationMinutes = (eh * 60 + (em || 0)) - (sh * 60 + (sm || 0));
+        if (durationMinutes <= 0) durationMinutes = 120;
+      }
+    }
+    const durationHours = Math.round((durationMinutes / 60) * 10) / 10;
+    ev.duration = `${durationHours}h`;
+
+    // Process Registrations & Automated Invoice / Payment Status
+    const regs = Array.isArray(ev.registrations) ? ev.registrations : [];
+    let paidCount = 0;
+    let partiallyPaidCount = 0;
+    let overdueCount = 0;
+    let invoicedCount = 0;
+    let pendingCount = 0;
+    let totalCollected = 0;
+    let totalOutstanding = 0;
+
+    const enrichedRegistrations = regs.map((reg) => {
+      const regObj = { ...reg };
+      const sId = reg.student?._id ? String(reg.student._id) : (reg.student ? String(reg.student) : null);
+      let regInvoice = null;
+
+      if (sId && invoicesByStudent.has(sId)) {
+        const candidateInvoices = invoicesByStudent.get(sId);
+        // Find exact invoice for this program or recent invoice
+        if (matchedProgram) {
+          regInvoice = candidateInvoices.find((inv) => String(inv.program) === String(matchedProgram._id));
+        }
+        if (!regInvoice && candidateInvoices.length > 0) {
+          regInvoice = candidateInvoices[0];
+        }
+      }
+
+      // Automated Payment Calculation
+      let autoPaymentStatus = 'Pending';
+      const now = new Date();
+
+      if (regInvoice) {
+        regObj.invoice = {
+          _id: regInvoice._id,
+          invoiceNumber: regInvoice.invoiceNumber,
+          totalAmount: regInvoice.totalAmount,
+          amountPaid: regInvoice.amountPaid,
+          balanceDue: regInvoice.balanceDue,
+          status: regInvoice.status,
+          dueDate: regInvoice.dueDate,
+        };
+        totalCollected += regInvoice.amountPaid || 0;
+        totalOutstanding += regInvoice.balanceDue || 0;
+
+        if (regInvoice.status === 'Paid' || regInvoice.balanceDue <= 0) {
+          autoPaymentStatus = 'Paid';
+        } else if (regInvoice.status === 'Partially Paid' || (regInvoice.amountPaid > 0 && regInvoice.balanceDue > 0)) {
+          autoPaymentStatus = 'Partially Paid';
+        } else if (regInvoice.status === 'Overdue' || (regInvoice.dueDate && new Date(regInvoice.dueDate) < now && regInvoice.balanceDue > 0)) {
+          autoPaymentStatus = 'Overdue';
+        } else if (regInvoice.status === 'Cancelled') {
+          autoPaymentStatus = 'Cancelled';
+        } else {
+          autoPaymentStatus = 'Invoiced';
+        }
+      } else if (reg.paymentStatus === 'Paid') {
+        autoPaymentStatus = 'Paid';
+      } else {
+        autoPaymentStatus = 'Pending';
+      }
+
+      regObj.autoPaymentStatus = autoPaymentStatus;
+
+      if (autoPaymentStatus === 'Paid') paidCount++;
+      else if (autoPaymentStatus === 'Partially Paid') partiallyPaidCount++;
+      else if (autoPaymentStatus === 'Overdue') overdueCount++;
+      else if (autoPaymentStatus === 'Invoiced') invoicedCount++;
+      else pendingCount++;
+
+      return regObj;
+    });
+
+    ev.registrations = enrichedRegistrations;
+    const totalRegs = enrichedRegistrations.length;
+
+    // Determine overall session financial status
+    let aggregateStatus = 'PENDING';
+    let statusLabel = 'PENDING';
+
+    if (totalRegs === 0) {
+      aggregateStatus = 'SCHEDULED';
+      statusLabel = 'NO STUDENTS';
+    } else if (overdueCount > 0) {
+      aggregateStatus = 'OVERDUE';
+      statusLabel = overdueCount === totalRegs ? 'OVERDUE' : `${overdueCount}/${totalRegs} OVERDUE`;
+    } else if (paidCount === totalRegs && totalRegs > 0) {
+      aggregateStatus = 'PAID';
+      statusLabel = totalRegs > 1 ? `PAID (${totalRegs}/${totalRegs})` : 'PAID';
+    } else if (partiallyPaidCount > 0 || (paidCount > 0 && paidCount < totalRegs)) {
+      aggregateStatus = 'PARTIALLY PAID';
+      statusLabel = `${paidCount}/${totalRegs} PAID`;
+    } else if (invoicedCount > 0) {
+      aggregateStatus = 'INVOICED';
+      statusLabel = 'INVOICED';
+    } else {
+      aggregateStatus = 'PENDING';
+      statusLabel = 'PENDING';
+    }
+
+    ev.financialSummary = {
+      aggregateStatus,
+      statusLabel,
+      totalRegistrations: totalRegs,
+      paidCount,
+      partiallyPaidCount,
+      overdueCount,
+      invoicedCount,
+      pendingCount,
+      totalCollected,
+      totalOutstanding,
+    };
+
+    return ev;
+  });
+
+  return enriched;
 };
 
 /**
@@ -94,9 +350,84 @@ exports.getCalendarEvents = catchAsync(async (req, res, next) => {
     else if (capacity === 'unlimited') filter.seatType = 'unlimited';
   }
 
-  const events = await CalendarEvent.find(filter)
+  const rawEvents = await CalendarEvent.find(filter)
     .populate(POPULATE_FIELDS)
     .sort({ date: 1, startTime: 1 });
+
+  // Also query active Schedule sessions in date range to ensure full calendar coverage
+  const scheduleFilter = {};
+  if (start || end) {
+    scheduleFilter.startTime = {};
+    if (start) scheduleFilter.startTime.$gte = toDayStart(start);
+    if (end) scheduleFilter.startTime.$lte = toDayEnd(end);
+  }
+  if (staffQuery) {
+    const teacherIds = String(staffQuery).split(',').map((s) => s.trim()).filter(Boolean);
+    if (teacherIds.length) {
+      scheduleFilter.instructor = teacherIds.length > 1 ? { $in: teacherIds } : teacherIds[0];
+    }
+  }
+
+  const rawSchedules = await Schedule.find(scheduleFilter)
+    .populate('program branch instructor student participants booking')
+    .sort({ startTime: 1 })
+    .lean();
+
+  const convertedSchedules = rawSchedules.map((sch) => {
+    const sDate = new Date(sch.startTime);
+    const eDate = sch.endTime ? new Date(sch.endTime) : new Date(sDate.getTime() + 2 * 3600 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    const startStr = `${pad(sDate.getHours())}:${pad(sDate.getMinutes())}`;
+    const endStr = `${pad(eDate.getHours())}:${pad(eDate.getMinutes())}`;
+
+    const initialRegs = [];
+    if (sch.student) {
+      initialRegs.push({
+        _id: sch.student._id || sch.student,
+        kind: 'enrolled',
+        student: sch.student,
+        attendance: sch.attendance?.toLowerCase() || 'pending',
+        paymentStatus: 'No Invoice',
+      });
+    }
+    if (Array.isArray(sch.participants)) {
+      sch.participants.forEach((p) => {
+        initialRegs.push({
+          _id: p._id || p,
+          kind: 'enrolled',
+          student: p,
+          attendance: 'pending',
+          paymentStatus: 'No Invoice',
+        });
+      });
+    }
+
+    return {
+      _id: sch._id,
+      type: sch.sessionType ? sch.sessionType.toLowerCase() : 'class',
+      eventType: 'one-time',
+      subject: sch.program?.category || sch.program?.title || 'Fishing Essentials',
+      title: sch.title,
+      program: sch.program,
+      branch: sch.branch,
+      date: sDate,
+      startTime: startStr,
+      endTime: endStr,
+      teacher: sch.instructor || null,
+      teachers: sch.instructor ? [sch.instructor] : [],
+      location: sch.location || sch.branch?.name || '',
+      seatType: 'limited',
+      capacity: sch.maxCapacity || 10,
+      status: sch.status === 'Completed' ? 'completed' : sch.status === 'Cancelled' ? 'cancelled' : 'scheduled',
+      registrations: initialRegs,
+      isScheduleModel: true,
+    };
+  });
+
+  const combinedRaw = [...rawEvents, ...convertedSchedules];
+
+  // Enrich with Program colors and automated Financial calculations
+  const events = await enrichEventsWithFinancials(combinedRaw);
 
   return sendResponse(res, 200, 'Calendar events fetched successfully.', events);
 });
@@ -141,7 +472,9 @@ exports.getSubjectOptions = catchAsync(async (req, res) => {
 exports.getCalendarEvent = catchAsync(async (req, res, next) => {
   const event = await CalendarEvent.findById(req.params.id).populate(POPULATE_FIELDS);
   if (!event) return next(new AppError('Calendar event not found.', 404));
-  return sendResponse(res, 200, 'Calendar event fetched successfully.', event);
+
+  const [enriched] = await enrichEventsWithFinancials([event]);
+  return sendResponse(res, 200, 'Calendar event fetched successfully.', enriched || event);
 });
 
 /**
@@ -153,6 +486,8 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
     eventType = 'one-time',
     subject = '',
     title,
+    program,
+    branch,
     classDescription = '',
     internalNotes = '',
     date,
@@ -210,6 +545,8 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
     eventType,
     subject,
     title: autoTitle,
+    program: program || null,
+    branch: branch || null,
     classDescription,
     internalNotes,
     date: parseUtcDate(date),
@@ -230,8 +567,9 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
   });
 
   await event.populate(POPULATE_FIELDS);
+  const [enriched] = await enrichEventsWithFinancials([event]);
 
-  return sendResponse(res, 201, 'Added to the calendar.', event);
+  return sendResponse(res, 201, 'Added to the calendar.', enriched || event);
 });
 
 /**
@@ -269,7 +607,9 @@ exports.updateCalendarEvent = catchAsync(async (req, res, next) => {
   }).populate(POPULATE_FIELDS);
 
   if (!event) return next(new AppError('Calendar event not found.', 404));
-  return sendResponse(res, 200, 'Calendar event updated.', event);
+
+  const [enriched] = await enrichEventsWithFinancials([event]);
+  return sendResponse(res, 200, 'Calendar event updated.', enriched || event);
 });
 
 /**
