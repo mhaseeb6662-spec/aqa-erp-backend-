@@ -15,7 +15,7 @@ const { PIPELINE_STAGES, OPEN_STAGES } = require('../config/crm.constants');
  * backs the main Leads table.
  */
 exports.getLeads = catchAsync(async (req, res) => {
-  const { search = '', source, stage, assignedTo, page = 1, limit = 10 } = req.query;
+  const { search = '', source, stage, assignedTo, sortBy = 'createdAt', sortOrder = 'desc', sort, page = 1, limit = 10 } = req.query;
 
   const filter = {};
   if (search) {
@@ -29,6 +29,39 @@ exports.getLeads = catchAsync(async (req, res) => {
   if (stage) filter.stage = stage;
   if (assignedTo) filter.assignedTo = assignedTo;
 
+  // Build validated sort object
+  const sortObj = {};
+  const allowedSortFields = {
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt',
+    fullName: 'fullName',
+    stage: 'stage',
+    source: 'source',
+  };
+
+  let targetField = 'createdAt';
+  let targetDirection = -1;
+
+  if (sort) {
+    if (sort.startsWith('-')) {
+      const field = sort.slice(1);
+      if (allowedSortFields[field]) {
+        targetField = allowedSortFields[field];
+        targetDirection = -1;
+      }
+    } else {
+      if (allowedSortFields[sort]) {
+        targetField = allowedSortFields[sort];
+        targetDirection = 1;
+      }
+    }
+  } else if (sortBy && allowedSortFields[sortBy]) {
+    targetField = allowedSortFields[sortBy];
+    targetDirection = (String(sortOrder).toLowerCase() === 'asc' || String(sortOrder) === '1') ? 1 : -1;
+  }
+
+  sortObj[targetField] = targetDirection;
+
   const pageNum = Math.max(Number(page), 1);
   const limitNum = Math.min(Math.max(Number(limit), 1), 100);
   const skip = (pageNum - 1) * limitNum;
@@ -36,7 +69,7 @@ exports.getLeads = catchAsync(async (req, res) => {
   const [leads, total] = await Promise.all([
     Lead.find(filter)
       .populate('assignedTo', 'fullName email')
-      .sort({ createdAt: -1 })
+      .sort(sortObj)
       .skip(skip)
       .limit(limitNum),
     Lead.countDocuments(filter),
