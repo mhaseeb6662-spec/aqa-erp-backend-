@@ -42,7 +42,13 @@ exports.getLeads = catchAsync(async (req, res) => {
   let targetField = 'createdAt';
   let targetDirection = -1;
 
-  if (sort) {
+  if (sort === 'newest') {
+    targetField = 'createdAt';
+    targetDirection = -1;
+  } else if (sort === 'oldest') {
+    targetField = 'createdAt';
+    targetDirection = 1;
+  } else if (sort) {
     if (sort.startsWith('-')) {
       const field = sort.slice(1);
       if (allowedSortFields[field]) {
@@ -115,7 +121,13 @@ exports.getPipeline = catchAsync(async (req, res) => {
   let targetField = 'createdAt';
   let targetDirection = -1;
 
-  if (sort) {
+  if (sort === 'newest') {
+    targetField = 'createdAt';
+    targetDirection = -1;
+  } else if (sort === 'oldest') {
+    targetField = 'createdAt';
+    targetDirection = 1;
+  } else if (sort) {
     if (sort.startsWith('-')) {
       const field = sort.slice(1);
       if (allowedSortFields[field]) {
