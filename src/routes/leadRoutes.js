@@ -2,6 +2,7 @@ const express = require('express');
 const { body } = require('express-validator');
 const leadController = require('../controllers/leadController');
 const leadImportController = require('../controllers/leadImportController');
+const csvUpload = require('../middleware/csvUpload');
 const validate = require('../middleware/validate');
 const { protect } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/rbac');
@@ -14,16 +15,25 @@ router.use(protect);
 // Static/collection routes must be declared before "/:id" routes.
 router.get('/pipeline', requirePermission(PERMISSIONS.PIPELINE_VIEW), leadController.getPipeline);
 
-// CSV Lead Import Endpoints (Permission-guarded)
+// CSV Lead Import Endpoints (Permission-guarded, supports multipart file or JSON)
+router.post(
+  '/import/upload',
+  requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_CREATE),
+  csvUpload.single('file'),
+  leadImportController.uploadCsvFile
+);
+
 router.post(
   '/import/validate',
   requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_CREATE),
+  csvUpload.single('file'),
   leadImportController.validateCsvData
 );
 
 router.post(
   '/import/execute',
   requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_CREATE),
+  csvUpload.single('file'),
   leadImportController.executeCsvImport
 );
 

@@ -7,6 +7,7 @@ const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const sendResponse = require('../utils/apiResponse');
 const logActivity = require('../utils/logActivity');
+const { parseCsvString } = require('../utils/csvParser');
 const { LEAD_SOURCES, PIPELINE_STAGES } = require('../config/crm.constants');
 
 // --- NORMALIZATION HELPERS ---
@@ -89,7 +90,7 @@ const DEFAULT_STAGE_MAP = {
   'Spam': 'lost',
   'spam': 'lost',
   'Lost': 'lost',
-  'lost': 'lost'
+  'lost': 'lost',
 };
 
 const DEFAULT_SOURCE_MAP = {
@@ -120,15 +121,121 @@ const DEFAULT_SOURCE_MAP = {
   'Advertisement': 'Advertisement',
   'Manual entry': 'Other',
   'Other': 'Other',
-  '': 'Other'
+  '': 'Other',
 };
+
+const ERP_MAPPING_RULES = [
+  { key: 'fullName', exact: ['name', 'full name', 'fullname', 'contact name', 'lead name', 'student name'], fallback: ['contact'] },
+  { key: 'firstName', exact: ['first name', 'firstname', 'fname'], fallback: [] },
+  { key: 'lastName', exact: ['last name', 'lastname', 'lname'], fallback: [] },
+  { key: 'phone', exact: ['phone', 'mobile', 'phone number', 'mobile number', 'contact number', 'tel', 'whatsapp'], fallback: [] },
+  { key: 'email', exact: ['email', 'email address', 'e-mail', 'mail'], fallback: [] },
+  { key: 'source', exact: ['source', 'lead source', 'channel', 'platform'], fallback: ['signup source'] },
+  { key: 'status', exact: ['status', 'stage', 'lead status', 'pipeline stage'], fallback: [] },
+  { key: 'owner', exact: ['owner', 'sales rep', 'assigned to', 'agent', 'salesperson'], fallback: [] },
+  { key: 'createdOn', exact: ['created on', 'created at', 'created date', 'date', 'signup date', 'lead date'], fallback: [] },
+  { key: 'interestLevel', exact: ['interest level', 'interest', 'priority', 'rating', 'temperature'], fallback: [] },
+  { key: 'subject', exact: ['subject', 'course', 'courses', 'program', 'interested in'], fallback: [] },
+  { key: 'notes', exact: ['last note', 'note', 'notes', 'comment', 'remarks'], fallback: [] },
+  { key: 'city', exact: ['city', 'location', 'emirate', 'address'], fallback: [] },
+  { key: 'age', exact: ['age'], fallback: [] },
+  { key: 'gender', exact: ['gender', 'sex'], fallback: [] },
+  { key: 'nationality', exact: ['nationality', 'country'], fallback: [] },
+  { key: 'guardianName', exact: ['guardian name', 'guardian', 'parent name', 'parent', 'father name', 'mother name'], fallback: [] },
+  { key: 'guardianPhone', exact: ['guardian phone', 'parent phone', 'emergency phone'], fallback: [] },
+  { key: 'guardianEmail', exact: ['guardian email', 'parent email'], fallback: [] },
+  { key: 'numberOfKids', exact: ['number of kids', 'kids', 'children', 'no of kids'], fallback: [] },
+  { key: 'birthday', exact: ['birthday', 'dob', 'date of birth'], fallback: [] },
+  { key: 'lastContacted', exact: ['last contacted', 'contacted date', 'last contact'], fallback: [] },
+  { key: 'followUp', exact: ['follow up', 'follow up date', 'followup', 'next follow up'], fallback: [] },
+];
+
+function generateAutoMapping(headers) {
+  const mapping = {};
+  const cleanHeaders = headers.map((h) => h.trim());
+
+  for (const rule of ERP_MAPPING_RULES) {
+    let matched = null;
+    for (const h of cleanHeaders) {
+      const hLower = h.toLowerCase();
+      if (rule.exact.includes(hLower)) {
+        matched = h;
+        break;
+      }
+    }
+    if (!matched && rule.fallback.length > 0) {
+      for (const h of cleanHeaders) {
+        const hLower = h.toLowerCase();
+        if (rule.fallback.includes(hLower)) {
+          matched = h;
+          break;
+        }
+      }
+    }
+    if (matched) {
+      mapping[rule.key] = matched;
+    }
+  }
+  return mapping;
+}
+
+function resolvePayloadRows(req) {
+  if (req.file && req.file.buffer) {
+    const csvString = req.file.buffer.toString('utf-8');
+    const { headers, rows } = parseCsvString(csvString);
+    return { headers, rows, filename: req.file.originalname };
+  }
+  if (Array.isArray(req.body.rows)) {
+    const headers = req.body.headers || (req.body.rows.length > 0 ? Object.keys(req.body.rows[0]) : []);
+    return { headers, rows: req.body.rows, filename: req.body.filename || 'leads.csv' };
+  }
+  if (typeof req.body.csvText === 'string') {
+    const { headers, rows } = parseCsvString(req.body.csvText);
+    return { headers, rows, filename: req.body.filename || 'leads.csv' };
+  }
+  return { headers: [], rows: [], filename: 'leads.csv' };
+}
+
+function parseJsonField(val, defaultVal = {}) {
+  if (!val) return defaultVal;
+  if (typeof val === 'object') return val;
+  try {
+    return JSON.parse(val);
+  } catch {
+    return defaultVal;
+  }
+}
+
+/**
+ * POST /api/v1/leads/import/upload
+ * Handles direct multipart file upload, parses CSV, suggests column mapping
+ */
+exports.uploadCsvFile = catchAsync(async (req, res, next) => {
+  const { headers, rows, filename } = resolvePayloadRows(req);
+
+  if (rows.length === 0) {
+    return next(new AppError('The uploaded CSV file contains no data rows.', 400));
+  }
+
+  const suggestedMapping = generateAutoMapping(headers);
+
+  return sendResponse(res, 200, 'CSV parsed successfully.', {
+    filename,
+    headers,
+    totalRows: rows.length,
+    sampleRows: rows.slice(0, 5),
+    suggestedMapping,
+  });
+});
 
 /**
  * POST /api/v1/leads/import/validate
- * Accepts CSV rows + field mapping and returns a dry-run validation preview
+ * Accepts CSV rows/file + field mapping and returns a dry-run validation preview
  */
-exports.validateCsvData = catchAsync(async (req, res) => {
-  const { rows = [], mapping = {}, options = {} } = req.body;
+exports.validateCsvData = catchAsync(async (req, res, next) => {
+  const { headers, rows } = resolvePayloadRows(req);
+  const mapping = parseJsonField(req.body.mapping, {});
+  const options = parseJsonField(req.body.options, {});
 
   if (!Array.isArray(rows) || rows.length === 0) {
     return next(new AppError('No CSV rows provided for validation.', 400));
@@ -354,7 +461,7 @@ exports.validateCsvData = catchAsync(async (req, res) => {
     stageBreakdown: stageCounts,
     ownerBreakdown: ownerCounts,
     unmatchedOwners: Array.from(unmatchedOwners),
-    previewRows: validatedRows.slice(0, 100), // First 100 preview rows
+    previewRows: validatedRows.slice(0, 100),
     totalValidatedRows: validatedRows.length,
   });
 });
@@ -364,17 +471,15 @@ exports.validateCsvData = catchAsync(async (req, res) => {
  * Performs the actual batched database import into MongoDB
  */
 exports.executeCsvImport = catchAsync(async (req, res, next) => {
-  const {
-    rows = [],
-    mapping = {},
-    options = {
-      isHistoricalImport: true,
-      skipDuplicates: true,
-      defaultSource: 'Other',
-      defaultStage: 'new',
-      batchName: '',
-    },
-  } = req.body;
+  const { headers, rows, filename } = resolvePayloadRows(req);
+  const mapping = parseJsonField(req.body.mapping, {});
+  const options = parseJsonField(req.body.options, {
+    isHistoricalImport: true,
+    skipDuplicates: true,
+    defaultSource: 'Other',
+    defaultStage: 'new',
+    batchName: '',
+  });
 
   if (!Array.isArray(rows) || rows.length === 0) {
     return next(new AppError('No lead rows provided for import.', 400));
@@ -386,7 +491,7 @@ exports.executeCsvImport = catchAsync(async (req, res, next) => {
   // Create initial batch record
   const batchRecord = await ImportBatch.create({
     batchId,
-    filename: options.batchName || 'leads_import.csv',
+    filename: options.batchName || filename || 'leads_import.csv',
     type: 'leads',
     totalRows: rows.length,
     status: 'started',
@@ -568,8 +673,17 @@ exports.executeCsvImport = catchAsync(async (req, res, next) => {
 
   for (let i = 0; i < docsToInsert.length; i += CHUNK_SIZE) {
     const chunk = docsToInsert.slice(i, i + CHUNK_SIZE);
-    const result = await Lead.insertMany(chunk, { ordered: false });
-    totalInserted += result.length;
+    try {
+      const result = await Lead.insertMany(chunk, { ordered: false });
+      totalInserted += result.length;
+    } catch (bulkErr) {
+      if (bulkErr.insertedDocs) {
+        totalInserted += bulkErr.insertedDocs.length;
+      }
+      if (bulkErr.writeErrors) {
+        dbDuplicatesSkipped += bulkErr.writeErrors.length;
+      }
+    }
   }
 
   const endTime = new Date();
@@ -578,7 +692,7 @@ exports.executeCsvImport = catchAsync(async (req, res, next) => {
   // Update batch record
   await ImportBatch.findByIdAndUpdate(batchRecord._id, {
     importedCount: totalInserted,
-    duplicatesSkipped: internalDuplicatesSkipped,
+    duplicatesSkipped: internalDuplicatesSkipped + dbDuplicatesSkipped,
     existingDuplicatesSkipped: dbDuplicatesSkipped,
     failedCount: failedRows.length,
     status: 'completed',
@@ -605,7 +719,8 @@ exports.executeCsvImport = catchAsync(async (req, res, next) => {
     batchId,
     totalRows: rows.length,
     importedCount: totalInserted,
-    duplicatesSkipped: internalDuplicatesSkipped,
+    duplicatesSkipped: internalDuplicatesSkipped + dbDuplicatesSkipped,
+    internalDuplicatesSkipped,
     existingDuplicatesSkipped: dbDuplicatesSkipped,
     failedCount: failedRows.length,
     durationSeconds: Number(durationSecs),
@@ -690,31 +805,31 @@ exports.downloadCsvTemplate = catchAsync(async (req, res) => {
   ];
 
   const sampleRow = [
-    'John',
-    'Smith',
-    'John Smith',
+    'Rashid',
+    'Al-Falasi',
+    'Rashid Al-Falasi',
     '+971501234567',
-    'john.smith@example.com',
+    'rashid@example.com',
     'Instagram',
     'New',
     'Warm',
     'Kayak Fishing Program',
-    'Sales Agent Name',
+    'Sales Agent',
     '2026-08-20 10:30:00',
-    '2026-08-20 14:00:00',
-    '2026-08-25 10:00:00',
-    'Interested in weekend morning session',
+    '2026-08-20 12:00:00',
+    '2026-08-25 09:00:00',
+    'Inquired for weekend session',
     'Dubai',
-    '32',
+    '28',
     'Male',
     'AE',
-    'Jane Smith',
+    'Fatima Al-Falasi',
     '+971509876543',
-    'jane.smith@example.com',
+    'fatima@example.com',
     '2'
   ];
 
-  const csvContent = `${headers.join(',')}\n${sampleRow.map((v) => `"${v}"`).join(',')}\n`;
+  const csvContent = `${headers.join(',')}\n"${sampleRow.join('","')}"\n`;
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="aqua_leads_import_template.csv"');

@@ -9,7 +9,13 @@
     "dev": "nodemon server.js",
     "seed": "node src/seed/seed.js"
   },
-  "keywords": ["erp", "aqua-fishing-academy", "phase1", "phase2", "crm"],
+  "keywords": [
+    "erp",
+    "aqua-fishing-academy",
+    "phase1",
+    "phase2",
+    "crm"
+  ],
   "author": "",
   "license": "ISC",
   "engines": {
@@ -28,6 +34,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.5.2",
     "morgan": "^1.10.0",
+    "multer": "^2.3.0",
     "xss-clean": "^0.1.4"
   },
   "devDependencies": {
