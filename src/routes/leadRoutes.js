@@ -1,6 +1,7 @@
 const express = require('express');
 const { body } = require('express-validator');
 const leadController = require('../controllers/leadController');
+const leadImportController = require('../controllers/leadImportController');
 const validate = require('../middleware/validate');
 const { protect } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/rbac');
@@ -12,6 +13,37 @@ router.use(protect);
 
 // Static/collection routes must be declared before "/:id" routes.
 router.get('/pipeline', requirePermission(PERMISSIONS.PIPELINE_VIEW), leadController.getPipeline);
+
+// CSV Lead Import Endpoints (Permission-guarded)
+router.post(
+  '/import/validate',
+  requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_CREATE),
+  leadImportController.validateCsvData
+);
+
+router.post(
+  '/import/execute',
+  requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_CREATE),
+  leadImportController.executeCsvImport
+);
+
+router.get(
+  '/import/batches',
+  requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_VIEW),
+  leadImportController.getImportBatches
+);
+
+router.get(
+  '/import/batches/:id',
+  requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_VIEW),
+  leadImportController.getImportBatchDetails
+);
+
+router.get(
+  '/import/template',
+  requirePermission(PERMISSIONS.LEADS_IMPORT, PERMISSIONS.LEADS_VIEW),
+  leadImportController.downloadCsvTemplate
+);
 
 router.patch(
   '/bulk-assign',
