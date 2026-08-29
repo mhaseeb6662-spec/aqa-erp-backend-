@@ -14,6 +14,7 @@ router.use(protect);
 
 // Static/collection routes must be declared before "/:id" routes.
 router.get('/pipeline', requirePermission(PERMISSIONS.PIPELINE_VIEW), leadController.getPipeline);
+router.get('/export', requirePermission(PERMISSIONS.LEADS_VIEW), leadController.exportLeads);
 
 // CSV Lead Import Endpoints (Permission-guarded, supports multipart file or JSON)
 router.post(

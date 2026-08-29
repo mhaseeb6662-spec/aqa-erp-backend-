@@ -390,3 +390,110 @@ exports.convertLead = catchAsync(async (req, res, next) => {
   await customer.populate('assignedTo', 'fullName email');
   return sendResponse(res, 201, `${lead.fullName} converted to a customer.`, customer);
 });
+
+/**
+ * GET /api/v1/leads/export
+ * Export filtered/permitted leads dataset as a downloadable CSV file.
+ */
+exports.exportLeads = catchAsync(async (req, res) => {
+  const { search = '', source, stage, assignedTo, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+
+  const filter = {};
+  if (search) {
+    filter.$or = [
+      { fullName: { $regex: search, $options: 'i' } },
+      { phone: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+    ];
+  }
+  if (source) filter.source = source;
+  if (stage) filter.stage = stage;
+  if (assignedTo) filter.assignedTo = assignedTo;
+
+  const sortObj = {};
+  const allowedSortFields = {
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt',
+    fullName: 'fullName',
+    stage: 'stage',
+    source: 'source',
+  };
+  const targetField = allowedSortFields[sortBy] || 'createdAt';
+  const targetDirection = (String(sortOrder).toLowerCase() === 'asc' || String(sortOrder) === '1') ? 1 : -1;
+  sortObj[targetField] = targetDirection;
+
+  const leads = await Lead.find(filter)
+    .populate('assignedTo', 'fullName email')
+    .sort(sortObj)
+    .lean();
+
+  const headers = [
+    'Full Name',
+    'Phone',
+    'Email',
+    'Source',
+    'Stage',
+    'Assigned To',
+    'Created Date',
+    'Last Contacted',
+    'Follow Up Date',
+    'Interest Level',
+    'Subject / Program',
+    'Notes',
+    'City',
+    'Age',
+    'Gender',
+    'Nationality',
+    'Guardian Name',
+    'Guardian Phone',
+    'Guardian Email',
+  ];
+
+  const sanitizeCell = (val) => {
+    if (val === null || val === undefined) return '';
+    let str = String(val).trim();
+    if (/^[=+\-@]/.test(str)) {
+      str = "'" + str;
+    }
+    if (/[",\n\r]/.test(str)) {
+      str = '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  };
+
+  const csvRows = [headers.map(sanitizeCell).join(',')];
+
+  leads.forEach((l) => {
+    const row = [
+      l.fullName,
+      l.phone,
+      l.email,
+      l.source,
+      l.stage,
+      l.assignedTo?.fullName || '',
+      l.createdAt ? new Date(l.createdAt).toISOString().split('T')[0] : '',
+      l.lastContacted ? new Date(l.lastContacted).toISOString().split('T')[0] : '',
+      l.followUpDate ? new Date(l.followUpDate).toISOString().split('T')[0] : '',
+      l.interestLevel,
+      l.interestedIn || l.subject,
+      l.notes,
+      l.city,
+      l.age,
+      l.gender,
+      l.nationality,
+      l.guardianName,
+      l.guardianPhone,
+      l.guardianEmail,
+    ];
+    csvRows.push(row.map(sanitizeCell).join(','));
+  });
+
+  const csvContent = '\uFEFF' + csvRows.join('\n');
+  const dateStr = new Date().toISOString().split('T')[0];
+  const filename = `aqua-fishing-leads-${dateStr}.csv`;
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  return res.status(200).send(csvContent);
+});
+
