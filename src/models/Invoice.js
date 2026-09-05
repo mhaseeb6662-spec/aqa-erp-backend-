@@ -67,6 +67,11 @@ const invoiceSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    amountRefunded: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     balanceDue: {
       type: Number,
       required: true,
@@ -74,7 +79,7 @@ const invoiceSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Draft', 'Sent', 'Paid', 'Partially Paid', 'Overdue', 'Cancelled'],
+      enum: ['Draft', 'Sent', 'Paid', 'Partially Paid', 'Overdue', 'Cancelled', 'Refunded', 'Partially Refunded'],
       default: 'Sent',
     },
     dueDate: {

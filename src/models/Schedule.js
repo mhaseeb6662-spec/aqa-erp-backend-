@@ -87,6 +87,11 @@ const scheduleSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
     }],
+    calendarEvent: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CalendarEvent',
+      default: null,
+    },
     equipmentAllocations: [{
       equipment: { type: mongoose.Schema.Types.ObjectId, ref: 'Equipment' },
       quantity: Number,
@@ -103,5 +108,9 @@ scheduleSchema.index({ student: 1, startTime: 1 });
 scheduleSchema.index({ branch: 1, startTime: 1 });
 scheduleSchema.index({ program: 1 });
 scheduleSchema.index({ instructor: 1 });
+scheduleSchema.index({ assistantCoach: 1 });
+scheduleSchema.index({ supportStaff: 1 });
+scheduleSchema.index({ calendarEvent: 1 });
+scheduleSchema.index({ startTime: 1, endTime: 1 });
 
 module.exports = mongoose.model('Schedule', scheduleSchema);

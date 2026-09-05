@@ -18,41 +18,52 @@ const SessionReport = require('../models/SessionReport');
 const KpiDefinition = require('../models/KpiDefinition');
 const ManagementAlert = require('../models/ManagementAlert');
 const AppError = require('../utils/appError');
+const { PIPELINE_STAGE_CONFIG } = require('../config/crm.constants');
 
 // -------------------------------------------------------------
 // Helper: Parse Date Ranges & Comparison Periods
 // -------------------------------------------------------------
 const parseDateFilters = (query) => {
   const now = new Date();
-  let currentStart = new Date(now);
-  let currentEnd = new Date(now);
-  let prevStart = new Date(now);
-  let prevEnd = new Date(now);
+  let currentStart = null;
+  let currentEnd = null;
+  let prevStart = null;
+  let prevEnd = null;
 
-  const range = query.range || 'this_month';
+  const range = query.range || 'all';
 
   if (range === 'today') {
+    currentStart = new Date(now);
     currentStart.setHours(0, 0, 0, 0);
+    currentEnd = new Date(now);
     currentEnd.setHours(23, 59, 59, 999);
 
+    prevStart = new Date(now);
     prevStart.setDate(prevStart.getDate() - 1);
     prevStart.setHours(0, 0, 0, 0);
+    prevEnd = new Date(now);
     prevEnd.setDate(prevEnd.getDate() - 1);
     prevEnd.setHours(23, 59, 59, 999);
   } else if (range === 'yesterday') {
+    currentStart = new Date(now);
     currentStart.setDate(currentStart.getDate() - 1);
     currentStart.setHours(0, 0, 0, 0);
+    currentEnd = new Date(now);
     currentEnd.setDate(currentEnd.getDate() - 1);
     currentEnd.setHours(23, 59, 59, 999);
 
+    prevStart = new Date(now);
     prevStart.setDate(prevStart.getDate() - 2);
     prevStart.setHours(0, 0, 0, 0);
+    prevEnd = new Date(now);
     prevEnd.setDate(prevEnd.getDate() - 2);
     prevEnd.setHours(23, 59, 59, 999);
   } else if (range === 'this_week') {
+    currentStart = new Date(now);
     const day = currentStart.getDay();
     currentStart.setDate(currentStart.getDate() - day);
     currentStart.setHours(0, 0, 0, 0);
+    currentEnd = new Date(now);
     currentEnd.setHours(23, 59, 59, 999);
 
     prevStart = new Date(currentStart);
@@ -60,7 +71,8 @@ const parseDateFilters = (query) => {
     prevEnd = new Date(currentStart);
     prevEnd.setMilliseconds(-1);
   } else if (range === 'last_week') {
-    const day = currentStart.getDay();
+    const day = now.getDay();
+    currentEnd = new Date(now);
     currentEnd.setDate(currentEnd.getDate() - day - 1);
     currentEnd.setHours(23, 59, 59, 999);
     currentStart = new Date(currentEnd);
@@ -71,28 +83,82 @@ const parseDateFilters = (query) => {
     prevStart.setDate(prevStart.getDate() - 7);
     prevEnd = new Date(currentStart);
     prevEnd.setMilliseconds(-1);
+  } else if (range === 'this_month') {
+    currentStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    currentEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    prevEnd = new Date(now.getFullYear(), now.getMonth() - 1, 0, 23, 59, 59, 999);
   } else if (range === 'last_month') {
     currentStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     currentEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
 
     prevStart = new Date(now.getFullYear(), now.getMonth() - 2, 1);
     prevEnd = new Date(now.getFullYear(), now.getMonth() - 1, 0, 23, 59, 59, 999);
-  } else if (range === 'custom' && query.startDate && query.endDate) {
-    currentStart = new Date(query.startDate);
+  } else if (range === 'this_quarter' || range === 'quarter' || range === '90d') {
+    currentStart = new Date(now);
+    currentStart.setDate(currentStart.getDate() - 90);
     currentStart.setHours(0, 0, 0, 0);
-    currentEnd = new Date(query.endDate);
+    currentEnd = new Date(now);
     currentEnd.setHours(23, 59, 59, 999);
 
-    const diffMs = currentEnd.getTime() - currentStart.getTime();
-    prevEnd = new Date(currentStart.getTime() - 1);
-    prevStart = new Date(prevEnd.getTime() - diffMs);
+    prevStart = new Date(currentStart);
+    prevStart.setDate(prevStart.getDate() - 90);
+    prevEnd = new Date(currentStart);
+    prevEnd.setMilliseconds(-1);
+  } else if (range === 'this_year' || range === 'year') {
+    currentStart = new Date(now.getFullYear(), 0, 1);
+    currentEnd = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+
+    prevStart = new Date(now.getFullYear() - 1, 0, 1);
+    prevEnd = new Date(now.getFullYear() - 1, 11, 31, 23, 59, 59, 999);
+  } else if (range === '7d') {
+    currentStart = new Date(now);
+    currentStart.setDate(currentStart.getDate() - 7);
+    currentStart.setHours(0, 0, 0, 0);
+    currentEnd = new Date(now);
+    currentEnd.setHours(23, 59, 59, 999);
+
+    prevStart = new Date(currentStart);
+    prevStart.setDate(prevStart.getDate() - 7);
+    prevEnd = new Date(currentStart);
+    prevEnd.setMilliseconds(-1);
+  } else if (range === '30d') {
+    currentStart = new Date(now);
+    currentStart.setDate(currentStart.getDate() - 30);
+    currentStart.setHours(0, 0, 0, 0);
+    currentEnd = new Date(now);
+    currentEnd.setHours(23, 59, 59, 999);
+
+    prevStart = new Date(currentStart);
+    prevStart.setDate(prevStart.getDate() - 30);
+    prevEnd = new Date(currentStart);
+    prevEnd.setMilliseconds(-1);
+  } else if (range === 'custom' && (query.startDate || query.endDate)) {
+    // UAE is UTC+4.
+    // Ensure accurate boundaries for the selected days in UAE time
+    // regardless of server local timezone.
+    if (query.startDate) {
+      const [y, m, d] = query.startDate.split('-');
+      currentStart = new Date(Date.UTC(parseInt(y), parseInt(m) - 1, parseInt(d), 0, 0, 0, 0));
+      currentStart.setUTCHours(currentStart.getUTCHours() - 4);
+    }
+    if (query.endDate) {
+      const [y, m, d] = query.endDate.split('-');
+      currentEnd = new Date(Date.UTC(parseInt(y), parseInt(m) - 1, parseInt(d), 23, 59, 59, 999));
+      currentEnd.setUTCHours(currentEnd.getUTCHours() - 4);
+    }
+    if (currentStart && currentEnd) {
+      const diffMs = currentEnd.getTime() - currentStart.getTime();
+      prevEnd = new Date(currentStart.getTime() - 1);
+      prevStart = new Date(prevEnd.getTime() - diffMs);
+    }
   } else {
-    // default: this_month
-    currentStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    currentEnd.setHours(23, 59, 59, 999);
-
-    prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    prevEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+    // 'all' or 'all_time' or default: no date bounding
+    currentStart = null;
+    currentEnd = null;
+    prevStart = null;
+    prevEnd = null;
   }
 
   return {
@@ -116,6 +182,13 @@ exports.getExecutiveOverview = async (req, res, next) => {
   try {
     const dates = parseDateFilters(req.query);
     const branchFilter = req.query.branchId ? { branch: req.query.branchId } : {};
+
+    const curDateMatch = (dates.current.start && dates.current.end) ? { createdAt: { $gte: dates.current.start, $lte: dates.current.end } } : {};
+    const prevDateMatch = (dates.previous.start && dates.previous.end) ? { createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } } : {};
+    const curSessionMatch = (dates.current.start && dates.current.end) ? { startTime: { $gte: dates.current.start, $lte: dates.current.end } } : {};
+    const prevSessionMatch = (dates.previous.start && dates.previous.end) ? { startTime: { $gte: dates.previous.start, $lte: dates.previous.end } } : {};
+    const curWonMatch = { stage: 'won', ...((dates.current.start && dates.current.end) ? { $or: [{ convertedAt: { $gte: dates.current.start, $lte: dates.current.end } }, { createdAt: { $gte: dates.current.start, $lte: dates.current.end } }] } : {}) };
+    const prevWonMatch = { stage: 'won', ...((dates.previous.start && dates.previous.end) ? { $or: [{ convertedAt: { $gte: dates.previous.start, $lte: dates.previous.end } }, { createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } }] } : {}) };
 
     // Parallel aggregate queries for Current & Previous period
     const [
@@ -141,44 +214,44 @@ exports.getExecutiveOverview = async (req, res, next) => {
     ] = await Promise.all([
       // Paid revenue
       PaymentTransaction.aggregate([
-        { $match: { status: { $in: ['Completed', 'Partially Refunded'] }, createdAt: { $gte: dates.current.start, $lte: dates.current.end } } },
+        { $match: { status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] }, ...curDateMatch } },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
       PaymentTransaction.aggregate([
-        { $match: { status: { $in: ['Completed', 'Partially Refunded'] }, createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } } },
+        { $match: { status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] }, ...prevDateMatch } },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
       // Invoiced amount & outstanding
       Invoice.aggregate([
-        { $match: { ...branchFilter, createdAt: { $gte: dates.current.start, $lte: dates.current.end } } },
+        { $match: { ...branchFilter, ...curDateMatch } },
         { $group: { _id: null, total: { $sum: '$totalAmount' }, balance: { $sum: '$balanceDue' } } },
       ]),
       Invoice.aggregate([
-        { $match: { ...branchFilter, createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } } },
+        { $match: { ...branchFilter, ...prevDateMatch } },
         { $group: { _id: null, total: { $sum: '$totalAmount' }, balance: { $sum: '$balanceDue' } } },
       ]),
       // Refunds
       Refund.aggregate([
-        { $match: { status: 'Processed', createdAt: { $gte: dates.current.start, $lte: dates.current.end } } },
+        { $match: { status: 'Processed', ...curDateMatch } },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
       Refund.aggregate([
-        { $match: { status: 'Processed', createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } } },
+        { $match: { status: 'Processed', ...prevDateMatch } },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
       // Leads
-      Lead.countDocuments({ createdAt: { $gte: dates.current.start, $lte: dates.current.end } }),
-      Lead.countDocuments({ createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } }),
+      Lead.countDocuments(curDateMatch),
+      Lead.countDocuments(prevDateMatch),
       // Won Leads
-      Lead.countDocuments({ stage: 'won', convertedAt: { $gte: dates.current.start, $lte: dates.current.end } }),
-      Lead.countDocuments({ stage: 'won', convertedAt: { $gte: dates.previous.start, $lte: dates.previous.end } }),
+      Lead.countDocuments(curWonMatch),
+      Lead.countDocuments(prevWonMatch),
       // Bookings
-      Booking.countDocuments({ ...branchFilter, createdAt: { $gte: dates.current.start, $lte: dates.current.end } }),
-      Booking.countDocuments({ ...branchFilter, createdAt: { $gte: dates.previous.start, $lte: dates.previous.end } }),
+      Booking.countDocuments({ ...branchFilter, ...curDateMatch }),
+      Booking.countDocuments({ ...branchFilter, ...prevDateMatch }),
       // Sessions
-      Schedule.countDocuments({ ...branchFilter, startTime: { $gte: dates.current.start, $lte: dates.current.end } }),
-      Schedule.countDocuments({ ...branchFilter, startTime: { $gte: dates.previous.start, $lte: dates.previous.end } }),
-      Schedule.countDocuments({ ...branchFilter, status: 'Completed', startTime: { $gte: dates.current.start, $lte: dates.current.end } }),
+      Schedule.countDocuments({ ...branchFilter, ...curSessionMatch }),
+      Schedule.countDocuments({ ...branchFilter, ...prevSessionMatch }),
+      Schedule.countDocuments({ ...branchFilter, status: 'Completed', ...curSessionMatch }),
       // Fleet & Inventory & Safety
       Vessel.find(),
       Equipment.countDocuments({ availableQuantity: { $lt: 5 }, status: 'Active' }),
@@ -205,7 +278,7 @@ exports.getExecutiveOverview = async (req, res, next) => {
     const prevConvRate = prevLeads > 0 ? Math.round((prevWonLeads / prevLeads) * 100) : 0;
 
     const totalVessels = allVessels.length;
-    const readyVessels = allVessels.filter((v) => v.operationalStatus === 'Available' && v.readinessStatus === 'Ready').length;
+    const readyVessels = allVessels.filter((v) => v.operationalStatus === 'Available').length;
     const maintenanceVessels = allVessels.filter((v) => v.operationalStatus === 'Maintenance').length;
     const fleetReadyRate = totalVessels > 0 ? Math.round((readyVessels / totalVessels) * 100) : 100;
 
@@ -445,39 +518,57 @@ exports.getSalesAnalytics = async (req, res, next) => {
   try {
     const dates = parseDateFilters(req.query);
 
+    const leadMatch = {};
+    if (dates.current.start && dates.current.end) {
+      leadMatch.createdAt = { $gte: dates.current.start, $lte: dates.current.end };
+    }
+
+    const wonMatch = { stage: 'won' };
+    if (dates.current.start && dates.current.end) {
+      wonMatch.$or = [
+        { convertedAt: { $gte: dates.current.start, $lte: dates.current.end } },
+        { createdAt: { $gte: dates.current.start, $lte: dates.current.end } },
+      ];
+    }
+
+    const lostMatch = { stage: 'lost', ...leadMatch };
+
     const [
       totalLeads,
       wonLeads,
       lostLeads,
       leadsBySource,
-      leadsByStage,
+      rawStageCounts,
       salesRepsData,
       recentLeads
     ] = await Promise.all([
-      Lead.countDocuments({ createdAt: { $gte: dates.current.start, $lte: dates.current.end } }),
-      Lead.countDocuments({ stage: 'won', convertedAt: { $gte: dates.current.start, $lte: dates.current.end } }),
-      Lead.countDocuments({ stage: 'lost', createdAt: { $gte: dates.current.start, $lte: dates.current.end } }),
+      Lead.countDocuments(leadMatch),
+      Lead.countDocuments(wonMatch),
+      Lead.countDocuments(lostMatch),
 
       Lead.aggregate([
-        { $match: { createdAt: { $gte: dates.current.start, $lte: dates.current.end } } },
+        ...(Object.keys(leadMatch).length > 0 ? [{ $match: leadMatch }] : []),
         { $group: { _id: '$source', count: { $sum: 1 }, wonCount: { $sum: { $cond: [{ $eq: ['$stage', 'won'] }, 1, 0] } } } },
         { $sort: { count: -1 } },
       ]),
 
       Lead.aggregate([
-        { $match: { createdAt: { $gte: dates.current.start, $lte: dates.current.end } } },
+        ...(Object.keys(leadMatch).length > 0 ? [{ $match: leadMatch }] : []),
         { $group: { _id: '$stage', count: { $sum: 1 } } },
       ]),
 
       User.aggregate([
         { $lookup: { from: 'roles', localField: 'role', foreignField: '_id', as: 'roleDoc' } },
         { $unwind: { path: '$roleDoc', preserveNullAndEmptyArrays: true } },
-        { $match: { 'roleDoc.slug': { $in: ['sales-representative', 'sales-manager', 'super-admin', 'admin'] } } },
+        { $match: { 'roleDoc.slug': { $in: ['sales-representative', 'sales-manager', 'super-admin', 'admin', 'sales-agent'] } } },
         {
           $lookup: {
             from: 'leads',
             localField: '_id',
             foreignField: 'assignedTo',
+            pipeline: [
+              ...(Object.keys(leadMatch).length > 0 ? [{ $match: leadMatch }] : []),
+            ],
             as: 'assignedLeads',
           },
         },
@@ -498,13 +589,45 @@ exports.getSalesAnalytics = async (req, res, next) => {
             },
           },
         },
+        { $sort: { wonCount: -1, totalAssigned: -1 } },
       ]),
 
-      Lead.find({ createdAt: { $gte: dates.current.start, $lte: dates.current.end } })
+      Lead.find(leadMatch)
         .populate('assignedTo', 'fullName email')
         .sort({ createdAt: -1 })
         .limit(10),
     ]);
+
+    // Build map of counts by lowercase stage key
+    const countMap = {};
+    rawStageCounts.forEach((r) => {
+      if (r._id) {
+        countMap[String(r._id).toLowerCase()] = r.count;
+      }
+    });
+
+    // Active stages from single source of truth
+    const activeStageConfig = (PIPELINE_STAGE_CONFIG || []).filter((s) => s.active !== false);
+
+    // Calculate total active pipeline leads
+    const totalPipelineLeads = totalLeads;
+
+    const leadsByStage = activeStageConfig.map((stage) => {
+      const count = countMap[stage.key.toLowerCase()] || 0;
+      const percent = totalPipelineLeads > 0 ? Math.round((count / totalPipelineLeads) * 100) : 0;
+      return {
+        stage: stage.key,
+        stageName: stage.label,
+        stageOrder: stage.order,
+        count,
+        percent,
+      };
+    });
+
+    // In-pipeline open leads (all active stages excluding won & lost)
+    const inPipeline = activeStageConfig
+      .filter((s) => !['won', 'lost'].includes(s.key))
+      .reduce((sum, s) => sum + (countMap[s.key] || 0), 0);
 
     const conversionRate = totalLeads > 0 ? Math.round((wonLeads / totalLeads) * 100) : 0;
 
@@ -515,7 +638,7 @@ exports.getSalesAnalytics = async (req, res, next) => {
           totalLeads,
           wonLeads,
           lostLeads,
-          inPipeline: totalLeads - wonLeads - lostLeads,
+          inPipeline,
           conversionRate,
         },
         leadsBySource: leadsBySource.map((s) => ({
@@ -524,10 +647,7 @@ exports.getSalesAnalytics = async (req, res, next) => {
           wonCount: s.wonCount,
           conversionRate: s.count > 0 ? Math.round((s.wonCount / s.count) * 100) : 0,
         })),
-        leadsByStage: leadsByStage.map((st) => ({
-          stage: st._id || 'New',
-          count: st.count,
-        })),
+        leadsByStage,
         salesReps: salesRepsData.map((rep) => ({
           repId: rep._id,
           name: rep.fullName,
@@ -589,7 +709,7 @@ exports.getOperationsAnalytics = async (req, res, next) => {
     const cancelledSessions = schedules.filter((s) => s.status === 'Cancelled').length;
 
     const totalVessels = vessels.length;
-    const readyVessels = vessels.filter((v) => v.operationalStatus === 'Available' && v.readinessStatus === 'Ready').length;
+    const readyVessels = vessels.filter((v) => v.operationalStatus === 'Available').length;
     const maintenanceVessels = vessels.filter((v) => v.operationalStatus === 'Maintenance').length;
 
     const totalEquipment = equipment.reduce((acc, eq) => acc + (eq.totalQuantity || 0), 0);
@@ -1048,7 +1168,7 @@ exports.getManagementReports = async (req, res, next) => {
           totalSessions: sessions.length,
           completedSessions: sessions.filter((s) => s.status === 'Completed').length,
           totalFleet: vessels.length,
-          readyFleet: vessels.filter((v) => v.operationalStatus === 'Available' && v.readinessStatus === 'Ready').length,
+          readyFleet: vessels.filter((v) => v.operationalStatus === 'Available').length,
         },
         details: {
           invoices: invoices.slice(0, 50),
@@ -1247,6 +1367,82 @@ exports.getDrilldownData = async (req, res, next) => {
       metricType,
       count: records.length,
       data: records,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// -------------------------------------------------------------
+// 13. GET /api/v1/management/customer-revenue
+// -------------------------------------------------------------
+exports.getCustomerRevenue = async (req, res, next) => {
+  try {
+    const { customerId } = req.query;
+    if (!customerId) return next(new AppError('Customer ID is required', 400));
+
+    const dates = parseDateFilters(req.query);
+    const curDateMatch = (dates.current.start && dates.current.end) 
+      ? { createdAt: { $gte: dates.current.start, $lte: dates.current.end } } 
+      : {};
+
+    const { Types } = require('mongoose');
+    let custIdObj;
+    try {
+      custIdObj = new Types.ObjectId(customerId);
+    } catch (e) {
+      return next(new AppError('Invalid Customer ID format', 400));
+    }
+
+    const branchMatch = req.query.branchId ? { 'invoiceData.branch': new Types.ObjectId(req.query.branchId) } : {};
+
+    const branchLookup = req.query.branchId ? [
+      {
+        $lookup: {
+          from: 'invoices',
+          localField: 'invoice',
+          foreignField: '_id',
+          as: 'invoiceData'
+        }
+      },
+      { $unwind: { path: '$invoiceData', preserveNullAndEmptyArrays: false } },
+      { $match: branchMatch }
+    ] : [];
+
+    const [paymentsAgg, refundsAgg] = await Promise.all([
+      PaymentTransaction.aggregate([
+        { 
+          $match: { 
+            customer: custIdObj,
+            status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] },
+            ...curDateMatch
+          } 
+        },
+        ...branchLookup,
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      Refund.aggregate([
+        { 
+          $match: { 
+            customer: custIdObj,
+            status: 'Processed',
+            ...curDateMatch
+          } 
+        },
+        ...branchLookup,
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ])
+    ]);
+
+    const totalPayments = paymentsAgg[0]?.total || 0;
+    const totalRefunds = refundsAgg[0]?.total || 0;
+    const netRevenue = totalPayments - totalRefunds;
+
+    return sendResponse(res, 200, 'Customer revenue calculated successfully', {
+      customerId,
+      totalPayments,
+      totalRefunds,
+      netRevenue,
     });
   } catch (err) {
     next(err);

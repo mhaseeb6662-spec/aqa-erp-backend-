@@ -12,6 +12,10 @@ const integrationLogSchema = new mongoose.Schema(
       required: true,
       enum: [
         'payment_gateway',
+        'Tabby',
+        'PayTabs',
+        'TotalPay',
+        'Stripe',
         'meta_leads',
         'google_leads',
         'whatsapp',
@@ -46,7 +50,7 @@ const integrationLogSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['SUCCESS', 'FAILED', 'RETRY_SCHEDULED', 'IGNORED_DUPLICATE'],
+      enum: ['SUCCESS', 'FAILED', 'ERROR', 'RETRY_SCHEDULED', 'IGNORED_DUPLICATE'],
       required: true,
       index: true,
     },

@@ -352,7 +352,7 @@ class NotificationService {
 
     const variables = {
       programName: schedule.program?.title || 'Academy Charter',
-      branchName: schedule.branch?.name || 'Main Marina',
+      branchName: schedule.branch?.name || 'Dubai',
       sessionDate: new Date(schedule.startTime).toLocaleDateString(),
       sessionTime: new Date(schedule.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       coachName: schedule.instructor?.fullName || 'Assigned Instructor',

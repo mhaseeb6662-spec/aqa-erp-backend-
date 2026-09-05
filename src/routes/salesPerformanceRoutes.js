@@ -7,7 +7,7 @@ const { PERMISSIONS } = require('../config/rbac.constants');
 const router = express.Router();
 
 router.use(protect);
-router.use(requirePermission(PERMISSIONS.PERFORMANCE_VIEW));
+router.use(requirePermission(PERMISSIONS.PERFORMANCE_VIEW, PERMISSIONS.REPORTS_VIEW));
 
 router.get('/overview', salesPerformanceController.getOverview);
 router.get('/by-rep', salesPerformanceController.getByRep);

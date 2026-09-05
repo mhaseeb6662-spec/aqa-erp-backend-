@@ -93,7 +93,7 @@ class ReportingService {
     const totalCollected = payments.filter((p) => p.status === 'Completed').reduce((acc, p) => acc + (p.amount || 0), 0);
     const totalOutstanding = invoices.reduce((acc, i) => acc + (i.balanceDue || 0), 0);
     const completedSessions = schedules.filter((s) => s.status === 'Completed').length;
-    const readyVessels = vessels.filter((v) => v.operationalStatus === 'Available' && v.readinessStatus === 'Ready').length;
+    const readyVessels = vessels.filter((v) => v.operationalStatus === 'Available').length;
 
     return {
       reportType: 'Daily Operational Snapshot',

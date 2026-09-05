@@ -5,6 +5,7 @@ const Incident = require('../models/Incident');
 const Schedule = require('../models/Schedule');
 const Branch = require('../models/Branch');
 const AppError = require('../utils/appError');
+const logActivity = require('../utils/logActivity');
 
 // --- Fleet Management ---
 
@@ -19,6 +20,14 @@ exports.getAllVessels = async (req, res, next) => {
 
 exports.createVessel = async (req, res, next) => {
   try {
+    if (req.body.branch) {
+      const Branch = require('../models/Branch');
+      const branchDoc = await Branch.findById(req.body.branch);
+      if (!branchDoc || !branchDoc.isActive) {
+        return next(new AppError('Invalid or inactive branch selected.', 400));
+      }
+    }
+
     const vesselId = req.body.vesselId || 'VES-' + Math.floor(100000 + Math.random() * 900000);
     const vessel = await Vessel.create({
       ...req.body,
@@ -34,6 +43,14 @@ exports.createVessel = async (req, res, next) => {
 
 exports.updateVessel = async (req, res, next) => {
   try {
+    if (req.body.branch) {
+      const Branch = require('../models/Branch');
+      const branchDoc = await Branch.findById(req.body.branch);
+      if (!branchDoc || !branchDoc.isActive) {
+        return next(new AppError('Invalid or inactive branch selected.', 400));
+      }
+    }
+
     const vessel = await Vessel.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true }).populate('branch', 'name code');
     if (!vessel) return next(new AppError('Vessel not found', 404));
     res.status(200).json({ success: true, data: vessel });
@@ -73,7 +90,7 @@ exports.getOperationsDashboard = async (req, res, next) => {
     let readyVessels = 0;
     let maintenanceVessels = 0;
     vessels.forEach((v) => {
-      if (v.operationalStatus === 'Available' && v.readinessStatus === 'Ready') readyVessels++;
+      if (v.operationalStatus === 'Available') readyVessels++;
       if (v.operationalStatus === 'Maintenance') maintenanceVessels++;
     });
 
@@ -187,6 +204,14 @@ exports.getInventoryMetrics = async (req, res, next) => {
 
 exports.createEquipment = async (req, res, next) => {
   try {
+    if (req.body.branch) {
+      const Branch = require('../models/Branch');
+      const branchDoc = await Branch.findById(req.body.branch);
+      if (!branchDoc || !branchDoc.isActive) {
+        return next(new AppError('Invalid or inactive branch selected.', 400));
+      }
+    }
+
     const total = Number(req.body.totalQuantity) || 0;
     const damaged = Number(req.body.damagedQuantity) || 0;
     const inUse = Number(req.body.inUseQuantity) || 0;
@@ -199,8 +224,11 @@ exports.createEquipment = async (req, res, next) => {
     const reorderLevel = Number(req.body.reorderLevel) || 5;
     const code = req.body.code || req.body.sku || ('EQ-' + Math.floor(100000 + Math.random() * 900000));
 
+    const description = req.body.description ? String(req.body.description).trim() : '';
+
     const eq = await Equipment.create({
       ...req.body,
+      description,
       code,
       inventoryType,
       totalQuantity: total,
@@ -215,6 +243,17 @@ exports.createEquipment = async (req, res, next) => {
     });
 
     const populated = await Equipment.findById(eq._id).populate('branch', 'name code city');
+
+    if (req.user) {
+      await logActivity({
+        entityType: 'customer',
+        entityId: req.user._id,
+        type: 'note',
+        description: `INVENTORY_ITEM_CREATED: Created item "${eq.name}" in category "${eq.category}".`,
+        performedBy: req.user._id,
+      }).catch(() => {});
+    }
+
     res.status(201).json({ success: true, data: populated });
   } catch (err) {
     next(err);
@@ -226,6 +265,14 @@ exports.updateEquipment = async (req, res, next) => {
     const item = await Equipment.findById(req.params.id);
     if (!item) return next(new AppError('Equipment/Merchandise item not found', 404));
 
+    if (req.body.branch) {
+      const Branch = require('../models/Branch');
+      const branchDoc = await Branch.findById(req.body.branch);
+      if (!branchDoc || !branchDoc.isActive) {
+        return next(new AppError('Invalid or inactive branch selected.', 400));
+      }
+    }
+
     const total = req.body.totalQuantity !== undefined ? Number(req.body.totalQuantity) : item.totalQuantity;
     const damaged = req.body.damagedQuantity !== undefined ? Number(req.body.damagedQuantity) : item.damagedQuantity;
     const inUse = req.body.inUseQuantity !== undefined ? Number(req.body.inUseQuantity) : (item.inUseQuantity || 0);
@@ -234,8 +281,11 @@ exports.updateEquipment = async (req, res, next) => {
 
     const available = Math.max(0, total - damaged - inUse - reserved);
 
+    const description = req.body.description !== undefined ? String(req.body.description).trim() : item.description;
+
     const updatePayload = {
       ...req.body,
+      description,
       totalQuantity: total,
       damagedQuantity: damaged,
       inUseQuantity: inUse,
@@ -248,6 +298,16 @@ exports.updateEquipment = async (req, res, next) => {
       new: true,
       runValidators: true,
     }).populate('branch', 'name code city');
+
+    if (req.user) {
+      await logActivity({
+        entityType: 'customer',
+        entityId: req.user._id,
+        type: 'note',
+        description: `INVENTORY_ITEM_UPDATED: Updated item "${eq.name}" (Branch: ${eq.branch?.name || 'Unassigned'}).`,
+        performedBy: req.user._id,
+      }).catch(() => {});
+    }
 
     res.status(200).json({ success: true, data: eq });
   } catch (err) {

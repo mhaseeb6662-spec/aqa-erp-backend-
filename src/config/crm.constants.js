@@ -27,6 +27,16 @@ const AUTOMATED_LEAD_SOURCES = ['Facebook Ads', 'Google Ads', 'WhatsApp'];
 // Ordered sales pipeline stages — order drives the Kanban board columns.
 const PIPELINE_STAGES = ['new', 'contacted', 'qualified', 'proposal', 'negotiation', 'won', 'lost'];
 
+const PIPELINE_STAGE_CONFIG = [
+  { key: 'new', label: 'New Lead', order: 1, active: true },
+  { key: 'contacted', label: 'Contacted', order: 2, active: true },
+  { key: 'qualified', label: 'Qualified', order: 3, active: true },
+  { key: 'proposal', label: 'Proposal Sent', order: 4, active: true },
+  { key: 'negotiation', label: 'Negotiation', order: 5, active: true },
+  { key: 'won', label: 'Won', order: 6, active: true },
+  { key: 'lost', label: 'Lost', order: 7, active: true },
+];
+
 const OPEN_STAGES = PIPELINE_STAGES.filter((s) => !['won', 'lost'].includes(s));
 
 const FOLLOW_UP_TYPES = ['Call', 'Email', 'Meeting', 'WhatsApp', 'Site Visit'];
@@ -58,7 +68,7 @@ const ENTITY_TYPES = ['lead', 'customer'];
 //  - "demo"  : a lead manually placed on the calendar (trial/demo class,
 //              consultation, walk-in visit — booked before conversion)
 //  - "class" : a real class session for an already-enrolled student
-const CALENDAR_EVENT_TYPES = ['demo', 'class'];
+const CALENDAR_EVENT_TYPES = ['demo', 'class', 'camp', 'trip', 'workshop'];
 
 const CALENDAR_EVENT_REPEAT_TYPES = ['one-time', 'repeating'];
 
@@ -95,6 +105,7 @@ module.exports = {
   LEAD_SOURCES,
   AUTOMATED_LEAD_SOURCES,
   PIPELINE_STAGES,
+  PIPELINE_STAGE_CONFIG,
   OPEN_STAGES,
   FOLLOW_UP_TYPES,
   FOLLOW_UP_STATUSES,

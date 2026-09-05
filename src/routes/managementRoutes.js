@@ -45,4 +45,7 @@ router.get('/audit', managementController.getAuditExplorer);
 // 12. Transaction Drill-Down Engine
 router.get('/drilldown', managementController.getDrilldownData);
 
+// 13. Customer Revenue Search
+router.get('/customer-revenue', managementController.getCustomerRevenue);
+
 module.exports = router;

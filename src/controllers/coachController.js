@@ -1,5 +1,7 @@
 const Schedule = require('../models/Schedule');
+const CalendarEvent = require('../models/CalendarEvent');
 const StudentProfile = require('../models/StudentProfile');
+const Customer = require('../models/Customer');
 const ProgressNote = require('../models/ProgressNote');
 const SessionReport = require('../models/SessionReport');
 const CoachCertification = require('../models/CoachCertification');
@@ -8,6 +10,18 @@ const Document = require('../models/Document');
 const User = require('../models/User');
 const Role = require('../models/Role');
 const AppError = require('../utils/appError');
+
+/**
+ * Returns Start & End of day in UAE Timezone (UTC+4 Asia/Dubai).
+ */
+const getUaeDayBounds = (dateInput = new Date()) => {
+  const d = new Date(dateInput);
+  const uaeDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dubai' }).format(d);
+  const [year, month, day] = uaeDateStr.split('-').map(Number);
+  const start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) - 4 * 60 * 60 * 1000);
+  const end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - 4 * 60 * 60 * 1000);
+  return { start, end };
+};
 
 // Helper to build schedule query filter for a coach
 const getCoachScheduleFilter = (coachUserId, isSuperAdmin) => {
@@ -25,12 +39,15 @@ const getCoachScheduleFilter = (coachUserId, isSuperAdmin) => {
 
 // Helper to check if session is assigned to logged in coach (unless Admin)
 const verifyCoachSessionAssignment = async (sessionId, coachUserId, isSuperAdmin) => {
-  const session = await Schedule.findById(sessionId)
+  const session = await Schedule.findOne({
+    $or: [{ _id: sessionId }, { calendarEvent: sessionId }],
+  })
     .populate('student', 'fullName email phone')
     .populate('participants', 'fullName email phone')
-    .populate('program', 'title code price')
-    .populate('branch', 'name code city')
+    .populate('program', 'title category level code price calendarColor durationHours durationMinutes durationWeeks sessionsCount')
+    .populate('branch', 'name code city address')
     .populate('instructor', 'fullName email phone')
+    .populate('assistantCoach', 'fullName email phone')
     .populate('vessel', 'name registrationNumber');
 
   if (!session) {
@@ -66,11 +83,8 @@ exports.getCoachDashboard = async (req, res, next) => {
 
     const baseFilter = getCoachScheduleFilter(coachUserId, isSuperAdmin);
 
-    // Start of today
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const endOfToday = new Date();
-    endOfToday.setHours(23, 59, 59, 999);
+    // UAE Timezone Bounds
+    const { start: startOfToday, end: endOfToday } = getUaeDayBounds();
 
     const [todaySessions, upcomingSessions, pendingReports, certs] = await Promise.all([
       Schedule.find({
@@ -79,8 +93,10 @@ exports.getCoachDashboard = async (req, res, next) => {
       })
         .populate('student', 'fullName email phone')
         .populate('participants', 'fullName email phone')
-        .populate('program', 'title')
-        .populate('branch', 'name')
+        .populate('program', 'title category level code price calendarColor durationHours durationMinutes')
+        .populate('branch', 'name code city address')
+        .populate('instructor', 'fullName email phone')
+        .populate('assistantCoach', 'fullName email phone')
         .sort({ startTime: 1 }),
 
       Schedule.find({
@@ -89,8 +105,10 @@ exports.getCoachDashboard = async (req, res, next) => {
       })
         .populate('student', 'fullName email phone')
         .populate('participants', 'fullName email phone')
-        .populate('program', 'title')
-        .populate('branch', 'name')
+        .populate('program', 'title category level code price calendarColor durationHours durationMinutes')
+        .populate('branch', 'name code city address')
+        .populate('instructor', 'fullName email phone')
+        .populate('assistantCoach', 'fullName email phone')
         .sort({ startTime: 1 })
         .limit(10),
 
@@ -108,7 +126,8 @@ exports.getCoachDashboard = async (req, res, next) => {
     
     // Extract unique assigned students from single student and group participants
     const studentIdSet = new Set();
-    todaySessions.forEach((s) => {
+    const allAssignedSessions = await Schedule.find(baseFilter).select('student participants');
+    allAssignedSessions.forEach((s) => {
       if (s.student?._id) studentIdSet.add(s.student._id.toString());
       else if (s.student) studentIdSet.add(s.student.toString());
       if (Array.isArray(s.participants)) {
@@ -161,7 +180,7 @@ exports.getAssignedSessions = async (req, res, next) => {
     const coachUserId = req.user?._id || req.user?.id;
     const roleSlug = req.user?.role?.slug || (typeof req.user?.role === 'string' ? req.user.role : '');
     const isSuperAdmin = roleSlug === 'super-admin' || roleSlug === 'admin';
-    const { status, date } = req.query;
+    const { status, date, type } = req.query;
 
     const filter = getCoachScheduleFilter(coachUserId, isSuperAdmin);
 
@@ -169,19 +188,22 @@ exports.getAssignedSessions = async (req, res, next) => {
       filter.status = status;
     }
 
+    if (type && type !== 'All') {
+      filter.sessionType = type;
+    }
+
     if (date) {
-      const targetDate = new Date(date);
-      const start = new Date(targetDate.setHours(0, 0, 0, 0));
-      const end = new Date(targetDate.setHours(23, 59, 59, 999));
+      const { start, end } = getUaeDayBounds(date);
       filter.startTime = { $gte: start, $lte: end };
     }
 
     const sessions = await Schedule.find(filter)
       .populate('student', 'fullName email phone')
       .populate('participants', 'fullName email phone')
-      .populate('program', 'title code price')
-      .populate('branch', 'name code city')
+      .populate('program', 'title category level code price calendarColor durationHours durationMinutes')
+      .populate('branch', 'name code city address')
       .populate('instructor', 'fullName email phone')
+      .populate('assistantCoach', 'fullName email phone')
       .populate('vessel', 'name registrationNumber')
       .sort({ startTime: -1 });
 
@@ -207,9 +229,34 @@ exports.getAssignedSessionById = async (req, res, next) => {
     // Fetch detailed student profile for assigned student
     let studentProfile = null;
     if (session.student) {
-      studentProfile = await StudentProfile.findOne({ user: session.student._id || session.student })
+      const sId = session.student._id || session.student;
+      studentProfile = await StudentProfile.findOne({ user: sId })
         .populate('user', 'fullName email phone avatarUrl')
         .populate('primaryBranch', 'name code');
+
+      if (!studentProfile) {
+        // Fall back to customer record if student profile not yet generated
+        const customer = await Customer.findById(sId);
+        if (customer) {
+          studentProfile = {
+            _id: customer._id,
+            user: {
+              _id: customer._id,
+              fullName: customer.fullName,
+              email: customer.email,
+              phone: customer.phone,
+            },
+            studentCode: customer.phone ? `STD-${customer.phone.slice(-4)}` : 'STD-GUEST',
+            skillLevel: 'Beginner',
+            medicalNotes: customer.hasBehaviouralNeeds ? customer.behaviouralNeedsDetails : 'No known allergies or medical restrictions.',
+            emergencyContact: {
+              name: customer.parentFullName || 'Parent On Record',
+              phone: customer.parentPhone || customer.phone,
+            },
+            mediaConsent: customer.socialMediaConsent !== false,
+          };
+        }
+      }
     }
 
     // Fetch existing progress notes & session reports for this session
@@ -250,6 +297,21 @@ exports.updateAttendance = async (req, res, next) => {
     session.attendance = attendance;
     if (notes !== undefined) session.notes = notes;
     await session.save();
+
+    // Sync back to CalendarEvent if linked
+    if (session.calendarEvent) {
+      try {
+        const calEvent = await CalendarEvent.findById(session.calendarEvent);
+        if (calEvent && Array.isArray(calEvent.registrations)) {
+          calEvent.registrations.forEach((r) => {
+            r.attendance = attendance.toLowerCase();
+          });
+          await calEvent.save();
+        }
+      } catch (ce) {
+        console.warn('Could not sync attendance back to CalendarEvent:', ce.message);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -349,6 +411,7 @@ exports.getAssignedStudents = async (req, res, next) => {
 
     const assignedUserIds = Array.from(studentIdSet);
 
+    // 1. Fetch StudentProfiles for registered users
     const studentProfiles = await StudentProfile.find({
       user: { $in: assignedUserIds },
     })
@@ -357,10 +420,41 @@ exports.getAssignedStudents = async (req, res, next) => {
       .populate('enrolledPrograms', 'title code')
       .sort({ createdAt: -1 });
 
+    const existingUserIds = new Set(studentProfiles.map((sp) => sp.user?._id?.toString()));
+    const missingIds = assignedUserIds.filter((id) => !existingUserIds.has(id));
+
+    // 2. Fetch Customer records for any CRM students not in StudentProfile
+    let customerProfiles = [];
+    if (missingIds.length > 0) {
+      const customers = await Customer.find({ _id: { $in: missingIds } });
+      customerProfiles = customers.map((c) => ({
+        _id: c._id,
+        user: {
+          _id: c._id,
+          fullName: c.fullName,
+          email: c.email,
+          phone: c.phone,
+        },
+        studentCode: c.phone ? `STD-${c.phone.slice(-4)}` : 'STD-GUEST',
+        skillLevel: 'Beginner',
+        primaryBranch: null,
+        medicalNotes: c.hasBehaviouralNeeds ? c.behaviouralNeedsDetails : 'No known allergies or medical restrictions.',
+        dietaryNotes: 'Standard diet.',
+        emergencyContact: {
+          name: c.parentFullName || 'Parent On Record',
+          phone: c.parentPhone || c.phone,
+          relationship: c.parentRelationship || 'Guardian',
+        },
+        mediaConsent: c.socialMediaConsent !== false,
+      }));
+    }
+
+    const combined = [...studentProfiles, ...customerProfiles];
+
     res.status(200).json({
       success: true,
-      count: studentProfiles.length,
-      data: studentProfiles,
+      count: combined.length,
+      data: combined,
     });
   } catch (err) {
     next(err);
@@ -381,9 +475,9 @@ exports.submitSessionReport = async (req, res, next) => {
     const session = await verifyCoachSessionAssignment(sessionId, coachUserId, isSuperAdmin);
 
     const report = await SessionReport.findOneAndUpdate(
-      { session: sessionId },
+      { session: session._id },
       {
-        session: sessionId,
+        session: session._id,
         coach: coachUserId,
         deliveryStatus: deliveryStatus || 'Completed',
         summary,
@@ -400,6 +494,15 @@ exports.submitSessionReport = async (req, res, next) => {
     // Update Session status to Completed
     session.status = 'Completed';
     await session.save();
+
+    // Sync status to CalendarEvent if linked
+    if (session.calendarEvent) {
+      try {
+        await CalendarEvent.findByIdAndUpdate(session.calendarEvent, { status: 'completed' });
+      } catch (ce) {
+        console.warn('Could not sync status back to CalendarEvent:', ce.message);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -458,30 +561,36 @@ exports.issueAchievement = async (req, res, next) => {
   try {
     const coachUserId = req.user._id;
     const isSuperAdmin = req.user.role?.slug === 'super-admin' || req.user.role?.slug === 'admin';
-    const { studentId, programId, sessionId, title, badgeType, remarks } = req.body;
+    const { studentId, title, badgeType, remarks } = req.body;
 
     if (!studentId || !title) {
-      return next(new AppError('Student ID and achievement title are required', 400));
+      return next(new AppError('Student ID and badge title are required', 400));
     }
 
-    if (sessionId) {
-      await verifyCoachSessionAssignment(sessionId, coachUserId, isSuperAdmin);
+    if (!isSuperAdmin) {
+      const coachFilter = getCoachScheduleFilter(coachUserId, false);
+      const isStudentAssigned = await Schedule.exists({
+        ...coachFilter,
+        $or: [{ student: studentId }, { participants: studentId }],
+      });
+
+      if (!isStudentAssigned) {
+        return next(new AppError('Access denied. You can only issue badges to your assigned students.', 403));
+      }
     }
 
     const achievement = await Achievement.create({
       student: studentId,
-      coach: coachUserId,
-      program: programId || null,
-      session: sessionId || null,
+      issuedBy: coachUserId,
       title,
-      badgeType: badgeType || 'Little Angler Badge',
-      remarks: remarks || 'Outstanding skill performance.',
-      status: 'Approved',
+      badgeType: badgeType || 'Knot Tying Specialist',
+      remarks: remarks || 'Demonstrated outstanding fishing performance.',
+      issuedDate: new Date(),
     });
 
     res.status(201).json({
       success: true,
-      message: 'Achievement badge issued successfully.',
+      message: 'Achievement badge awarded successfully.',
       data: achievement,
     });
   } catch (err) {
@@ -493,75 +602,25 @@ exports.issueAchievement = async (req, res, next) => {
 exports.getCoachCertifications = async (req, res, next) => {
   try {
     const coachUserId = req.user._id;
-    let certs = await CoachCertification.find({ coach: coachUserId }).sort({ expiryDate: 1 });
-
-    // Seed default sample certifications if empty for demonstration
-    if (certs.length === 0) {
-      const issue = new Date(Date.now() - 180 * 86400000);
-      const expiry = new Date(Date.now() + 180 * 86400000);
-      certs = await CoachCertification.insertMany([
-        {
-          coach: coachUserId,
-          title: 'UAE Maritime Safety & Offshore Survival License',
-          certificationType: 'Maritime Safety',
-          issuingAuthority: 'UAE Federal Maritime Authority',
-          issueDate: issue,
-          expiryDate: expiry,
-          status: 'Active',
-        },
-        {
-          coach: coachUserId,
-          title: 'Emergency First Aid & CPR Certification',
-          certificationType: 'First Aid',
-          issuingAuthority: 'Dubai Health Authority / Red Crescent',
-          issueDate: issue,
-          expiryDate: new Date(Date.now() + 20 * 86400000), // Expiring in 20 days
-          status: 'Active',
-        },
-      ]);
-    }
-
-    res.status(200).json({
-      success: true,
-      count: certs.length,
-      data: certs,
-    });
+    const certs = await CoachCertification.find({ coach: coachUserId }).sort({ expiryDate: 1 });
+    res.status(200).json({ success: true, count: certs.length, data: certs });
   } catch (err) {
     next(err);
   }
 };
 
-// 11. GET /api/v1/coach/admin/all-coaches (Super Admin Management View)
+// 11. GET /api/v1/coach/admin/all-coaches
 exports.getAllCoaches = async (req, res, next) => {
   try {
-    const coachRole = await Role.findOne({ slug: 'coach' });
-    const coachUsers = await User.find({
-      role: coachRole?._id,
-      status: 'active',
-    }).select('fullName email phone branch avatarUrl');
+    const coachRoles = await Role.find({ slug: { $in: ['coach', 'instructor', 'head-coach'] } });
+    const coachRoleIds = coachRoles.map((r) => r._id);
 
-    const coachesWithStats = await Promise.all(
-      coachUsers.map(async (c) => {
-        const [sessionsCount, activeStudents, certs] = await Promise.all([
-          Schedule.countDocuments({ instructor: c._id }),
-          Schedule.distinct('student', { instructor: c._id }),
-          CoachCertification.find({ coach: c._id }),
-        ]);
+    const coaches = await User.find({ role: { $in: coachRoleIds } })
+      .populate('role', 'name slug')
+      .populate('branch', 'name code')
+      .select('fullName email phone avatarUrl status role branch');
 
-        return {
-          user: c,
-          totalAssignedSessions: sessionsCount,
-          activeStudentsCount: activeStudents.length,
-          certifications: certs,
-        };
-      })
-    );
-
-    res.status(200).json({
-      success: true,
-      count: coachesWithStats.length,
-      data: coachesWithStats,
-    });
+    res.status(200).json({ success: true, count: coaches.length, data: coaches });
   } catch (err) {
     next(err);
   }

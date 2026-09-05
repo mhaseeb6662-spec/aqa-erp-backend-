@@ -4,14 +4,14 @@ const Customer = require('../models/Customer');
 const User = require('../models/User');
 const Program = require('../models/Program');
 const Branch = require('../models/Branch');
+const Vessel = require('../models/Vessel');
 const Schedule = require('../models/Schedule');
 const Booking = require('../models/Booking');
 const Invoice = require('../models/Invoice');
-const Subject = require('../models/Subject');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const sendResponse = require('../utils/apiResponse');
-const { CALENDAR_SUBJECT_OPTIONS } = require('../config/crm.constants');
+const { syncCalendarEventToSchedule, removeCalendarEventSchedule } = require('../utils/syncCalendarSchedule');
 
 function addMinutesToTime(timeStr, minutes) {
   if (!timeStr || !timeStr.includes(':')) return '';
@@ -38,6 +38,8 @@ const POPULATE_FIELDS = [
   { path: 'teachers', select: 'fullName email branch' },
   { path: 'program', select: 'title code category level price calendarColor durationWeeks sessionsCount' },
   { path: 'branch', select: 'name code city address' },
+  { path: 'boat', select: 'name vesselId registrationNumber vesselType operationalStatus capacity branch' },
+  { path: 'vessel', select: 'name vesselId registrationNumber vesselType operationalStatus capacity branch' },
   { path: 'createdBy', select: 'fullName email' },
   { path: 'registrations.lead', select: 'fullName phone email source stage' },
   { path: 'registrations.student', select: 'fullName phone email' },
@@ -161,25 +163,10 @@ const enrichEventsWithFinancials = async (events) => {
     if (ev.program) {
       matchedProgram = typeof ev.program === 'object' ? ev.program : programMapById.get(String(ev.program));
     }
-    if (!matchedProgram && ev.subject) {
-      const subKey = ev.subject.trim().toLowerCase();
-      matchedProgram = programMapByTitle.get(subKey) || programMapByCategory.get(subKey);
-    }
-    if (!matchedProgram && ev.title) {
-      const titleKey = ev.title.trim().toLowerCase();
-      matchedProgram = programMapByTitle.get(titleKey);
-      if (!matchedProgram) {
-        for (const [pTitle, pObj] of programMapByTitle.entries()) {
-          if (titleKey.includes(pTitle) || pTitle.includes(titleKey)) {
-            matchedProgram = pObj;
-            break;
-          }
-        }
-      }
-    }
 
-    const programCategory = matchedProgram?.category || ev.subject || 'Fishing Essentials';
-    const calendarColor = getCategoryColor(programCategory, matchedProgram?.calendarColor);
+    const programCategory = matchedProgram?.category || 'Fishing Essentials';
+    const baseColor = getCategoryColor(programCategory, matchedProgram?.calendarColor);
+    const calendarColor = ev.calendarColor || baseColor;
 
     ev.programDetails = {
       _id: matchedProgram?._id || null,
@@ -249,7 +236,11 @@ const enrichEventsWithFinancials = async (events) => {
         totalCollected += regInvoice.amountPaid || 0;
         totalOutstanding += regInvoice.balanceDue || 0;
 
-        if (regInvoice.status === 'Paid' || regInvoice.balanceDue <= 0) {
+        if (regInvoice.status === 'Refunded') {
+          autoPaymentStatus = 'Refunded';
+        } else if (regInvoice.status === 'Partially Refunded') {
+          autoPaymentStatus = 'Partially Refunded';
+        } else if (regInvoice.status === 'Paid' || regInvoice.balanceDue <= 0) {
           autoPaymentStatus = 'Paid';
         } else if (regInvoice.status === 'Partially Paid' || (regInvoice.amountPaid > 0 && regInvoice.balanceDue > 0)) {
           autoPaymentStatus = 'Partially Paid';
@@ -338,7 +329,11 @@ exports.getCalendarEvents = catchAsync(async (req, res, next) => {
     if (end) filter.date.$lte = toDayEnd(end);
   }
 
-  const staffQuery = teacher || staff;
+  const userId = req.user?._id || req.user?.id;
+  const roleSlug = req.user?.role?.slug || (typeof req.user?.role === 'string' ? req.user.role : '');
+  const isCoach = roleSlug === 'coach' || roleSlug === 'instructor' || roleSlug === 'head-coach';
+
+  const staffQuery = isCoach ? String(userId) : (teacher || staff);
   if (staffQuery) {
     const teacherIds = String(staffQuery).split(',').map((s) => s.trim()).filter(Boolean);
     if (teacherIds.length) {
@@ -380,10 +375,21 @@ exports.getCalendarEvents = catchAsync(async (req, res, next) => {
     if (start) scheduleFilter.startTime.$gte = toDayStart(start);
     if (end) scheduleFilter.startTime.$lte = toDayEnd(end);
   }
-  if (staffQuery) {
+  if (isCoach) {
+    scheduleFilter.$or = [
+      { instructor: userId },
+      { captain: userId },
+      { assistantCoach: userId },
+      { supportStaff: userId },
+    ];
+  } else if (staffQuery) {
     const teacherIds = String(staffQuery).split(',').map((s) => s.trim()).filter(Boolean);
     if (teacherIds.length) {
-      scheduleFilter.instructor = teacherIds.length > 1 ? { $in: teacherIds } : teacherIds[0];
+      scheduleFilter.$or = [
+        { instructor: teacherIds.length > 1 ? { $in: teacherIds } : teacherIds[0] },
+        { assistantCoach: teacherIds.length > 1 ? { $in: teacherIds } : teacherIds[0] },
+        { supportStaff: teacherIds.length > 1 ? { $in: teacherIds } : teacherIds[0] },
+      ];
     }
   }
 
@@ -392,7 +398,13 @@ exports.getCalendarEvents = catchAsync(async (req, res, next) => {
     .sort({ startTime: 1 })
     .lean();
 
-  const convertedSchedules = rawSchedules.map((sch) => {
+  // Deduplicate schedules that are already represented as CalendarEvents
+  const existingEventIds = new Set(rawEvents.map((e) => String(e._id)));
+  const standaloneSchedules = rawSchedules.filter(
+    (sch) => !sch.calendarEvent || !existingEventIds.has(String(sch.calendarEvent))
+  );
+
+  const convertedSchedules = standaloneSchedules.map((sch) => {
     const sDate = new Date(sch.startTime);
     const eDate = sch.endTime ? new Date(sch.endTime) : new Date(sDate.getTime() + 2 * 3600 * 1000);
     const pad = (n) => String(n).padStart(2, '0');
@@ -467,8 +479,9 @@ exports.getTeacherOptions = catchAsync(async (req, res) => {
  * GET /api/v1/calendar/locations
  */
 exports.getLocationOptions = catchAsync(async (req, res) => {
-  const branches = await User.distinct('branch', { status: 'active' });
-  const locations = branches.filter(Boolean).sort((a, b) => a.localeCompare(b));
+  const Branch = require('../models/Branch');
+  const activeBranches = await Branch.find({ isActive: true }).select('name').sort({ name: 1 });
+  const locations = activeBranches.map((b) => b.name);
 
   return sendResponse(res, 200, 'Location options fetched successfully.', locations);
 });
@@ -476,20 +489,6 @@ exports.getLocationOptions = catchAsync(async (req, res) => {
 /**
  * GET /api/v1/calendar/subjects
  */
-exports.getSubjectOptions = catchAsync(async (req, res) => {
-  const activeSubjects = await Subject.find({ status: { $ne: 'archived' } }).sort({ sortOrder: 1, name: 1 });
-  let combinedNames;
-  if (activeSubjects.length > 0) {
-    combinedNames = activeSubjects.map(s => s.name);
-  } else {
-    const dbSubjects = await CalendarEvent.distinct('subject');
-    combinedNames = Array.from(new Set([...CALENDAR_SUBJECT_OPTIONS, ...dbSubjects]))
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b));
-  }
-
-  return sendResponse(res, 200, 'Subject options fetched successfully.', combinedNames);
-});
 
 /**
  * GET /api/v1/calendar/:id
@@ -529,19 +528,57 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
     capacity = null,
     publishedStatus = 'published',
     notes = '',
+    calendarColor = '',
+    venue = 'Classroom',
+    boat = null,
+    vessel = null,
+    transportationRequired = false,
+    transportation = false,
   } = req.body;
 
   if (!date) return next(new AppError('Date is required.', 400));
   if (!startTime) return next(new AppError('Start time is required.', 400));
 
-  // Find linked Subject or default duration
-  let subjectDoc = null;
-  if (subject) {
-    subjectDoc = await Subject.findOne({ name: { $regex: new RegExp(`^${subject.trim()}$`, 'i') } });
+  let validatedBranchId = null;
+  let branchName = '';
+  if (branch) {
+    const Branch = require('../models/Branch');
+    const branchDoc = await Branch.findById(branch);
+    if (!branchDoc || !branchDoc.isActive) {
+      return next(new AppError('Invalid or inactive branch selected.', 400));
+    }
+    validatedBranchId = branchDoc._id;
+    branchName = branchDoc.name;
+  }
+
+  const normalizedVenue = String(venue || 'Classroom').toLowerCase() === 'boat' ? 'Boat' : 'Classroom';
+  let selectedBoatId = null;
+
+  if (normalizedVenue === 'Boat') {
+    selectedBoatId = boat || vessel || req.body.boat || req.body.vessel || null;
+    if (!selectedBoatId) {
+      return next(new AppError('Please select a Boat for this boat session.', 400));
+    }
+    const boatDoc = await Vessel.findById(selectedBoatId);
+    if (!boatDoc) {
+      return next(new AppError('Selected boat not found.', 404));
+    }
+    if (['Maintenance', 'Out of Service', 'Unavailable'].includes(boatDoc.operationalStatus)) {
+      return next(new AppError(`Boat "${boatDoc.name}" is currently ${boatDoc.operationalStatus} and cannot be assigned.`, 400));
+    }
+  }
+
+  let programDoc = null;
+  if (program) {
+    programDoc = await Program.findById(program);
+    if (programDoc && programDoc.status === 'inactive') {
+      return next(new AppError('This program is archived and cannot be used for new events.', 400));
+    }
   }
 
   // Determine duration and end time
-  let finalDuration = durationMinutes ? Number(durationMinutes) : (subjectDoc?.defaultDuration || 60);
+  const defaultDuration = programDoc ? (programDoc.durationHours || 0) * 60 + (programDoc.durationMinutes || 0) : 60;
+  let finalDuration = durationMinutes ? Number(durationMinutes) : (defaultDuration || 60);
   let finalEndTime = endTime;
 
   if (!finalEndTime && startTime && finalDuration) {
@@ -564,7 +601,7 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
   }
 
   if (!autoTitle) {
-    autoTitle = subject ? `${subject} Session` : 'New Event';
+    autoTitle = programDoc ? `${programDoc.title} Session` : 'New Event';
   }
 
   const assignedTeachers = Array.isArray(teachers) ? teachers.filter(Boolean) : [];
@@ -582,15 +619,43 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
   if (lead) initialRegistrations.push({ kind: 'trial', lead, student: null });
   else if (student) initialRegistrations.push({ kind: 'enrolled', lead: null, student });
 
+  if (normalizedVenue === 'Boat' && selectedBoatId) {
+    const eventDate = parseUtcDate(date);
+    const eventStart = startTime;
+    const eventEnd = finalEndTime || (startTime && finalDuration ? addMinutesToTime(startTime, finalDuration) : '');
+
+    if (eventDate && eventStart && eventEnd) {
+      const overlap = await CalendarEvent.findOne({
+        date: eventDate,
+        status: { $ne: 'cancelled' },
+        venue: 'Boat',
+        $or: [{ boat: selectedBoatId }, { vessel: selectedBoatId }],
+        startTime: { $lt: eventEnd },
+        endTime: { $gt: eventStart },
+      });
+
+      if (overlap) {
+        const boatDoc = await Vessel.findById(selectedBoatId);
+        return next(new AppError(`Boat "${boatDoc?.name || 'Selected Boat'}" is already assigned to overlapping event "${overlap.title}" (${overlap.startTime} - ${overlap.endTime}).`, 400));
+      }
+    }
+  }
+
+  const isTrans = Boolean(transportationRequired || transportation || req.body.transportationRequired || req.body.transportation);
+
   const event = await CalendarEvent.create({
     type,
     eventType,
-    subject: subject ? subject.trim() : '',
-    subjectId: subjectDoc?._id || null,
     durationMinutes: finalDuration,
     title: autoTitle,
     program: program || null,
-    branch: branch || null,
+    calendarColor,
+    branch: validatedBranchId,
+    venue: normalizedVenue,
+    boat: normalizedVenue === 'Boat' ? selectedBoatId : null,
+    vessel: normalizedVenue === 'Boat' ? selectedBoatId : null,
+    transportationRequired: isTrans,
+    transportation: isTrans,
     classDescription,
     internalNotes,
     date: parseUtcDate(date),
@@ -601,7 +666,7 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
     teacher: primaryTeacher,
     teachers: assignedTeachers,
     isOnline: Boolean(isOnline),
-    location: isOnline ? '' : location || teacherDoc?.branch || '',
+    location: isOnline ? '' : location || branchName || teacherDoc?.branch || '',
     seatType,
     capacity: seatType === 'limited' ? Number(capacity) || 10 : null,
     publishedStatus,
@@ -611,6 +676,7 @@ exports.createCalendarEvent = catchAsync(async (req, res, next) => {
   });
 
   await event.populate(POPULATE_FIELDS);
+  await syncCalendarEventToSchedule(event);
   const [enriched] = await enrichEventsWithFinancials([event]);
 
   return sendResponse(res, 201, 'Added to the calendar.', enriched || event);
@@ -625,13 +691,6 @@ exports.updateCalendarEvent = catchAsync(async (req, res, next) => {
 
   if (req.body.date) {
     req.body.date = parseUtcDate(req.body.date);
-  }
-
-  if (req.body.subject) {
-    const subjectDoc = await Subject.findOne({ name: { $regex: new RegExp(`^${req.body.subject.trim()}$`, 'i') } });
-    if (subjectDoc) {
-      req.body.subjectId = subjectDoc._id;
-    }
   }
 
   if (req.body.startTime && req.body.durationMinutes && !req.body.endTime) {
@@ -658,6 +717,80 @@ exports.updateCalendarEvent = catchAsync(async (req, res, next) => {
     req.body.notes = req.body.internalNotes;
   }
 
+  const existingEvent = await CalendarEvent.findById(req.params.id);
+  if (!existingEvent) return next(new AppError('Calendar event not found.', 404));
+
+  if (req.body.venue !== undefined) {
+    const normVenue = String(req.body.venue).toLowerCase() === 'boat' ? 'Boat' : 'Classroom';
+    req.body.venue = normVenue;
+
+    if (normVenue === 'Boat') {
+      const bId = req.body.boat || req.body.vessel || existingEvent.boat || existingEvent.vessel;
+      if (!bId) {
+        return next(new AppError('Please select a Boat for this boat session.', 400));
+      }
+      const boatDoc = await Vessel.findById(bId);
+      if (!boatDoc) {
+        return next(new AppError('Selected boat not found.', 404));
+      }
+      if (['Maintenance', 'Out of Service', 'Unavailable'].includes(boatDoc.operationalStatus)) {
+        return next(new AppError(`Boat "${boatDoc.name}" is currently ${boatDoc.operationalStatus} and cannot be assigned.`, 400));
+      }
+
+      const eventDate = req.body.date ? parseUtcDate(req.body.date) : existingEvent.date;
+      const eventStart = req.body.startTime || existingEvent.startTime;
+      const eventEnd = req.body.endTime || existingEvent.endTime;
+
+      if (eventDate && eventStart && eventEnd) {
+        const overlap = await CalendarEvent.findOne({
+          _id: { $ne: req.params.id },
+          date: eventDate,
+          status: { $ne: 'cancelled' },
+          venue: 'Boat',
+          $or: [{ boat: bId }, { vessel: bId }],
+          startTime: { $lt: eventEnd },
+          endTime: { $gt: eventStart },
+        });
+
+        if (overlap) {
+          return next(new AppError(`Boat "${boatDoc.name}" is already assigned to overlapping event "${overlap.title}" (${overlap.startTime} - ${overlap.endTime}).`, 400));
+        }
+      }
+      req.body.boat = bId;
+      req.body.vessel = bId;
+    } else {
+      req.body.boat = null;
+      req.body.vessel = null;
+    }
+  }
+
+  if (req.body.transportationRequired !== undefined || req.body.transportation !== undefined) {
+    const transVal = Boolean(req.body.transportationRequired || req.body.transportation);
+    req.body.transportationRequired = transVal;
+    req.body.transportation = transVal;
+  }
+
+  if (req.body.program && String(req.body.program) !== String(existingEvent.program)) {
+    const programDoc = await Program.findById(req.body.program);
+    if (programDoc && programDoc.status === 'inactive') {
+      return next(new AppError('This program is archived and cannot be used for events.', 400));
+    }
+  }
+
+  if (req.body.branch !== undefined) {
+    if (req.body.branch) {
+      const Branch = require('../models/Branch');
+      const branchDoc = await Branch.findById(req.body.branch);
+      if (!branchDoc || !branchDoc.isActive) {
+        return next(new AppError('Invalid or inactive branch selected.', 400));
+      }
+      req.body.branch = branchDoc._id;
+      if (!req.body.location) req.body.location = branchDoc.name;
+    } else {
+      req.body.branch = null;
+    }
+  }
+
   const event = await CalendarEvent.findByIdAndUpdate(req.params.id, req.body, {
     new: true,
     runValidators: true,
@@ -665,6 +798,7 @@ exports.updateCalendarEvent = catchAsync(async (req, res, next) => {
 
   if (!event) return next(new AppError('Calendar event not found.', 404));
 
+  await syncCalendarEventToSchedule(event);
   const [enriched] = await enrichEventsWithFinancials([event]);
   return sendResponse(res, 200, 'Calendar event updated.', enriched || event);
 });
@@ -683,6 +817,7 @@ exports.updateCalendarEventStatus = catchAsync(async (req, res, next) => {
   );
 
   if (!event) return next(new AppError('Calendar event not found.', 404));
+  await syncCalendarEventToSchedule(event);
   return sendResponse(res, 200, 'Calendar event status updated.', event);
 });
 
@@ -692,6 +827,7 @@ exports.updateCalendarEventStatus = catchAsync(async (req, res, next) => {
 exports.deleteCalendarEvent = catchAsync(async (req, res, next) => {
   const event = await CalendarEvent.findByIdAndDelete(req.params.id);
   if (!event) return next(new AppError('Calendar event not found.', 404));
+  await removeCalendarEventSchedule(req.params.id);
   return sendResponse(res, 200, 'Calendar event removed.');
 });
 
@@ -739,6 +875,7 @@ exports.addRegistration = catchAsync(async (req, res, next) => {
   });
   await event.save();
   await event.populate(POPULATE_FIELDS);
+  await syncCalendarEventToSchedule(event);
 
   return sendResponse(res, 201, 'Added to the event.', event);
 });
@@ -756,6 +893,7 @@ exports.removeRegistration = catchAsync(async (req, res, next) => {
   registration.deleteOne();
   await event.save();
   await event.populate(POPULATE_FIELDS);
+  await syncCalendarEventToSchedule(event);
 
   return sendResponse(res, 200, 'Removed from the event.', event);
 });
@@ -778,6 +916,7 @@ exports.updateRegistrationAttendance = catchAsync(async (req, res, next) => {
   registration.attendance = attendance;
   await event.save();
   await event.populate(POPULATE_FIELDS);
+  await syncCalendarEventToSchedule(event);
 
   return sendResponse(res, 200, 'Attendance updated.', event);
 });

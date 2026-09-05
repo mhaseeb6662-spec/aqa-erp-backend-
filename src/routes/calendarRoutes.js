@@ -13,7 +13,6 @@ router.use(protect);
 // Static sub-routes before the generic "/:id" so they never get swallowed by it.
 router.get('/teachers', requirePermission(PERMISSIONS.CALENDAR_VIEW), calendarController.getTeacherOptions);
 router.get('/locations', requirePermission(PERMISSIONS.CALENDAR_VIEW), calendarController.getLocationOptions);
-router.get('/subjects', requirePermission(PERMISSIONS.CALENDAR_VIEW), calendarController.getSubjectOptions);
 router.post('/quick-student', requirePermission(PERMISSIONS.CALENDAR_CREATE), calendarController.quickCreateStudent);
 
 router.get('/', requirePermission(PERMISSIONS.CALENDAR_VIEW), calendarController.getCalendarEvents);

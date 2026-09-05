@@ -9,14 +9,11 @@ const programSchema = new mongoose.Schema(
     },
     code: {
       type: String,
-      required: [true, 'Program code is required'],
-      unique: true,
       uppercase: true,
       trim: true,
     },
     category: {
       type: String,
-      enum: ['Fishing Essentials', 'Offshore & Deep Sea', 'Kayak & Boating', 'Junior Angler', 'Spearfishing & Diving', 'Custom Private'],
       default: 'Fishing Essentials',
     },
     description: {
@@ -26,7 +23,6 @@ const programSchema = new mongoose.Schema(
     },
     level: {
       type: String,
-      enum: ['Beginner', 'Intermediate', 'Advanced', 'Master'],
       default: 'Beginner',
     },
     ageGroup: {
@@ -37,6 +33,14 @@ const programSchema = new mongoose.Schema(
     durationWeeks: {
       type: Number,
       default: 4,
+    },
+    durationHours: {
+      type: Number,
+      default: 1,
+    },
+    durationMinutes: {
+      type: Number,
+      default: 0,
     },
     sessionsCount: {
       type: Number,
@@ -53,6 +57,14 @@ const programSchema = new mongoose.Schema(
         ref: 'Branch',
       },
     ],
+    brochureUrl: {
+      type: String,
+      default: '',
+    },
+    brochureMetadata: {
+      type: Object,
+      default: {},
+    },
     imageUrl: {
       type: String,
       default: '',
@@ -68,7 +80,7 @@ const programSchema = new mongoose.Schema(
     },
     calendarColor: {
       type: String,
-      enum: ['blue', 'teal', 'emerald', 'rose', 'amber', 'purple', 'indigo'],
+      enum: ['blue', 'teal', 'emerald', 'rose', 'amber', 'purple', 'indigo', 'red', 'green', 'orange', 'yellow', 'pink'],
       default: 'blue',
     },
   },

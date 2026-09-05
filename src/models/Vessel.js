@@ -37,6 +37,16 @@ const vesselSchema = new mongoose.Schema(
       enum: ['Ready', 'Not Ready'],
       default: 'Ready',
     },
+    photoUrl: {
+      type: String,
+      default: '',
+    },
+    photoMetadata: {
+      fileName: { type: String, default: '' },
+      fileSize: { type: Number, default: 0 },
+      mimeType: { type: String, default: '' },
+      uploadedAt: { type: Date },
+    },
     location: {
       type: String,
     },

@@ -58,10 +58,13 @@ exports.getUserById = catchAsync(async (req, res, next) => {
  */
 exports.createUser = catchAsync(async (req, res, next) => {
   const { fullName, email, password, phone, role, branch, status } = req.body;
+  const sEmail = (email || '').trim().toLowerCase() || undefined;
 
-  const existing = await User.findOne({ email });
-  if (existing) {
-    return next(new AppError('An account with this email already exists.', 409));
+  if (sEmail) {
+    const existing = await User.findOne({ email: sEmail });
+    if (existing) {
+      return next(new AppError('An account with this email already exists.', 409));
+    }
   }
 
   const roleDoc = await Role.findById(role);
@@ -69,7 +72,7 @@ exports.createUser = catchAsync(async (req, res, next) => {
 
   const user = await User.create({
     fullName,
-    email,
+    email: sEmail,
     password,
     phone,
     role,
@@ -96,8 +99,20 @@ exports.createUser = catchAsync(async (req, res, next) => {
  * PATCH /api/v1/users/:id
  */
 exports.updateUser = catchAsync(async (req, res, next) => {
-  const disallowed = ['password', 'email'];
+  const disallowed = ['password'];
   disallowed.forEach((field) => delete req.body[field]);
+  
+  if (req.body.email !== undefined) {
+    const sEmail = (req.body.email || '').trim().toLowerCase() || undefined;
+    req.body.email = sEmail;
+    
+    if (sEmail) {
+      const existing = await User.findOne({ email: sEmail, _id: { $ne: req.params.id } });
+      if (existing) {
+        return next(new AppError('An account with this email already exists.', 409));
+      }
+    }
+  }
 
   if (req.body.role) {
     const roleDoc = await Role.findById(req.body.role);

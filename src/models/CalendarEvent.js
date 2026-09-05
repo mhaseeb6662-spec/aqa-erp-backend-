@@ -63,16 +63,6 @@ const calendarEventSchema = new mongoose.Schema(
       enum: CALENDAR_EVENT_REPEAT_TYPES,
       default: 'one-time',
     },
-    subject: {
-      type: String,
-      trim: true,
-      default: '',
-    },
-    subjectId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Subject',
-      default: null,
-    },
     durationMinutes: {
       type: Number,
       default: 60,
@@ -94,6 +84,10 @@ const calendarEventSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: '',
+    },
+    calendarColor: {
+      type: String,
+      default: '', // empty string means it will fall back to program default
     },
     date: {
       type: Date,
@@ -141,6 +135,29 @@ const calendarEventSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Branch',
       default: null,
+    },
+    venue: {
+      type: String,
+      enum: ['Classroom', 'Boat', 'CLASSROOM', 'BOAT'],
+      default: 'Classroom',
+    },
+    boat: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Vessel',
+      default: null,
+    },
+    vessel: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Vessel',
+      default: null,
+    },
+    transportationRequired: {
+      type: Boolean,
+      default: false,
+    },
+    transportation: {
+      type: Boolean,
+      default: false,
     },
     isOnline: {
       type: Boolean,
@@ -191,7 +208,7 @@ const calendarEventSchema = new mongoose.Schema(
 calendarEventSchema.index({ date: 1, startTime: 1 });
 calendarEventSchema.index({ teacher: 1, date: 1 });
 calendarEventSchema.index({ teachers: 1, date: 1 });
-calendarEventSchema.index({ subject: 1 });
+calendarEventSchema.index({ program: 1 });
 calendarEventSchema.index({ location: 1 });
 
 module.exports = mongoose.model('CalendarEvent', calendarEventSchema);

@@ -154,6 +154,11 @@ const customerSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

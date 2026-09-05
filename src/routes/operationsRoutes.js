@@ -22,6 +22,15 @@ router.route('/vessels/:id')
   .delete(requirePermission(PERMISSIONS.OPERATIONS_FLEET_MANAGE), operationsController.deleteVessel);
 
 // Equipment & Inventory
+const categoryController = require('../controllers/inventoryCategoryController');
+router.route('/inventory-categories')
+  .get(requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_VIEW), categoryController.getCategories)
+  .post(requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), categoryController.createCategory);
+router.route('/inventory-categories/:id')
+  .put(requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), categoryController.updateCategory)
+  .delete(requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), categoryController.deleteCategory);
+router.patch('/inventory-categories/:id/archive', requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), categoryController.archiveCategory);
+
 router.get('/equipment/metrics', requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_VIEW), operationsController.getInventoryMetrics);
 router.post('/equipment/:id/movement', requirePermission(PERMISSIONS.OPERATIONS_EQUIPMENT_MANAGE), operationsController.adjustEquipmentStock);
 

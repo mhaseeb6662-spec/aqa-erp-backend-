@@ -26,6 +26,14 @@ const start = async () => {
     console.error('[Seed] Failed to ensure default roles/Super Admin:', err.message);
   }
 
+  // Ensure all CalendarEvents have linked Schedule records for Coach Portal access
+  try {
+    const { syncAllExistingCalendarEvents } = require('./src/utils/syncCalendarSchedule');
+    await syncAllExistingCalendarEvents();
+  } catch (err) {
+    console.error('[Sync] Failed to sync CalendarEvents to Schedule on boot:', err.message);
+  }
+
   const server = app.listen(config.port, () => {
     console.log(`Aqua Fishing Academy ERP API running in ${config.env} mode on port ${config.port}`);
   });

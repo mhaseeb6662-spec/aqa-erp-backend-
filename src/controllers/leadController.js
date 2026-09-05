@@ -9,13 +9,52 @@ const sendResponse = require('../utils/apiResponse');
 const logActivity = require('../utils/logActivity');
 const { PIPELINE_STAGES, OPEN_STAGES } = require('../config/crm.constants');
 
+const applyDateFilter = (filter, { datePeriod, startDate, endDate }) => {
+  if (!datePeriod && !startDate && !endDate) return filter;
+
+  const now = new Date();
+  let start, end;
+
+  if (datePeriod === 'Daily') {
+    start = new Date(now.setHours(0, 0, 0, 0));
+    end = new Date(now.setHours(23, 59, 59, 999));
+  } else if (datePeriod === 'Weekly') {
+    const d = new Date(now);
+    const day = d.getDay() || 7;
+    if (day !== 1) d.setHours(-24 * (day - 1));
+    start = new Date(d.setHours(0, 0, 0, 0));
+    end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    end.setHours(23, 59, 59, 999);
+  } else if (datePeriod === 'Monthly') {
+    start = new Date(now.getFullYear(), now.getMonth(), 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  } else if (datePeriod === 'Yearly') {
+    start = new Date(now.getFullYear(), 0, 1);
+    end = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+  } else if (datePeriod === 'Custom' && (startDate || endDate)) {
+    if (startDate) start = new Date(startDate);
+    if (endDate) {
+      end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+    }
+  }
+
+  if (start || end) {
+    filter.createdAt = {};
+    if (start) filter.createdAt.$gte = start;
+    if (end) filter.createdAt.$lte = end;
+  }
+  return filter;
+};
+
 /**
  * GET /api/v1/leads
  * Lead list with search, source/stage/assignedTo filters and pagination —
  * backs the main Leads table.
  */
 exports.getLeads = catchAsync(async (req, res) => {
-  const { search = '', source, stage, assignedTo, sortBy = 'createdAt', sortOrder = 'desc', sort, page = 1, limit = 10 } = req.query;
+  const { search = '', source, stage, assignedTo, sortBy = 'createdAt', sortOrder = 'desc', sort, page = 1, limit = 10, datePeriod, startDate, endDate } = req.query;
 
   const filter = {};
   if (search) {
@@ -28,6 +67,8 @@ exports.getLeads = catchAsync(async (req, res) => {
   if (source) filter.source = source;
   if (stage) filter.stage = stage;
   if (assignedTo) filter.assignedTo = assignedTo;
+
+  applyDateFilter(filter, { datePeriod, startDate, endDate });
 
   // Build validated sort object
   const sortObj = {};
@@ -95,7 +136,7 @@ exports.getLeads = catchAsync(async (req, res) => {
  * Registered before "/:id" so it isn't swallowed by the id route.
  */
 exports.getPipeline = catchAsync(async (req, res) => {
-  const { assignedTo, stage, source, search = '', sortBy = 'createdAt', sortOrder = 'desc', sort } = req.query;
+  const { assignedTo, stage, source, search = '', sortBy = 'createdAt', sortOrder = 'desc', sort, datePeriod, startDate, endDate } = req.query;
 
   const filter = {};
   if (assignedTo) filter.assignedTo = assignedTo;
@@ -108,6 +149,8 @@ exports.getPipeline = catchAsync(async (req, res) => {
       { email: { $regex: search, $options: 'i' } },
     ];
   }
+
+  applyDateFilter(filter, { datePeriod, startDate, endDate });
 
   // Build validated sort object
   const sortObj = {};
@@ -396,7 +439,7 @@ exports.convertLead = catchAsync(async (req, res, next) => {
  * Export filtered/permitted leads dataset as a downloadable CSV file.
  */
 exports.exportLeads = catchAsync(async (req, res) => {
-  const { search = '', source, stage, assignedTo, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+  const { search = '', source, stage, assignedTo, sortBy = 'createdAt', sortOrder = 'desc', datePeriod, startDate, endDate } = req.query;
 
   const filter = {};
   if (search) {
@@ -409,6 +452,8 @@ exports.exportLeads = catchAsync(async (req, res) => {
   if (source) filter.source = source;
   if (stage) filter.stage = stage;
   if (assignedTo) filter.assignedTo = assignedTo;
+
+  applyDateFilter(filter, { datePeriod, startDate, endDate });
 
   const sortObj = {};
   const allowedSortFields = {

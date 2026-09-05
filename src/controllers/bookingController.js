@@ -15,9 +15,13 @@ exports.createBooking = async (req, res, next) => {
 
     const program = await Program.findById(programId);
     if (!program) return next(new AppError('Program not found', 404));
+    
+    if (program.status === 'inactive') {
+      return next(new AppError('This program is archived and no longer accepts new bookings.', 400));
+    }
 
     const branch = await Branch.findById(branchId);
-    if (!branch) return next(new AppError('Branch not found', 404));
+    if (!branch || !branch.isActive) return next(new AppError('Invalid or inactive branch selected.', 400));
 
     let targetStudentId = req.user.id;
 

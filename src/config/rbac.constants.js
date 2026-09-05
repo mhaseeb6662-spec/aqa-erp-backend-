@@ -36,6 +36,8 @@ const PERMISSIONS = {
   ROLES_VIEW: 'core:roles:view',
   ROLES_MANAGE: 'core:roles:manage',
   SETTINGS_MANAGE: 'core:settings:manage',
+  PORTAL_BRANCHES_VIEW: 'portal:branches:view',
+  PORTAL_BRANCHES_MANAGE: 'portal:branches:manage',
 
   // ---- Phase 2 — Sales CRM & Lead Management ----
   LEADS_VIEW: 'crm:leads:view',

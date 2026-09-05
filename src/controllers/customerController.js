@@ -94,6 +94,18 @@ exports.createCustomer = catchAsync(async (req, res, next) => {
     return next(new AppError('Student name and contact phone number are required.', 400));
   }
 
+  // Validate Branch if provided
+  const Branch = require('../models/Branch');
+  let validatedBranchId = null;
+  const branchInput = req.body.branch || req.body.primaryBranch;
+  if (branchInput) {
+    const branchDoc = await Branch.findById(branchInput);
+    if (!branchDoc || !branchDoc.isActive) {
+      return next(new AppError('Invalid or inactive branch selected.', 400));
+    }
+    validatedBranchId = branchDoc._id;
+  }
+
   // 1. Resolve or Create Parent account if parent email provided
   let parentUserId = null;
   const pEmail = (parentEmail || '').trim().toLowerCase();
@@ -149,54 +161,61 @@ exports.createCustomer = catchAsync(async (req, res, next) => {
     interestedIn: interestedIn.trim(),
     notes: notes.trim(),
     assignedTo: assignedTo || null,
+    branch: validatedBranchId,
     originalLead: null,
     createdBy: req.user?._id || null,
   });
 
   // 3. Create or Link Student Portal User & Profile
   const sEmail = (email || '').trim().toLowerCase();
+  
+  // Find existing student by email (only if email is provided)
+  let studentUser = null;
   if (sEmail) {
-    let studentUser = await User.findOne({ email: sEmail });
-    if (!studentUser) {
-      const studentRole = await Role.findOne({ slug: 'student' });
-      studentUser = await User.create({
-        fullName: resolvedFullName,
-        email: sEmail,
-        phone: phone.trim(),
-        role: studentRole?._id,
-        password: 'Student@12345',
-        status: 'active',
-      });
+    studentUser = await User.findOne({ email: sEmail });
+  }
 
-      const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
-      await StudentProfile.create({
-        user: studentUser._id,
-        parentUser: parentUserId,
-        studentCode,
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
-        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
-        gender: gender || 'Prefer not to say',
-        nationality: nationality.trim(),
-        emiratesIdUrl,
-        emiratesIdMetadata,
-        streetAddress: streetAddress.trim(),
-        country: country.trim(),
-        city: city.trim(),
-        state: state.trim(),
-        zipCode: zipCode.trim(),
-        hasBehaviouralNeeds: Boolean(hasBehaviouralNeeds),
-        behaviouralNeedsDetails: hasBehaviouralNeeds ? (behaviouralNeedsDetails || '').trim() : '',
-        socialMediaConsent: Boolean(socialMediaConsent),
-        hearAboutUs: source,
-      });
+  if (!studentUser) {
+    const studentRole = await Role.findOne({ slug: 'student' });
+    studentUser = await User.create({
+      fullName: resolvedFullName,
+      email: sEmail || undefined, // undefined prevents unique index collision
+      phone: phone.trim(),
+      role: studentRole?._id,
+      branch: validatedBranchId,
+      password: 'Student@12345',
+      status: 'active',
+    });
 
-      if (parentUserId) {
-        await ParentProfile.findOneAndUpdate(
-          { user: parentUserId },
-          { $addToSet: { children: studentUser._id } }
-        );
-      }
+    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
+    await StudentProfile.create({
+      user: studentUser._id,
+      parentUser: parentUserId,
+      studentCode,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      primaryBranch: validatedBranchId,
+      dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+      gender: gender || 'Prefer not to say',
+      nationality: nationality.trim(),
+      emiratesIdUrl,
+      emiratesIdMetadata,
+      streetAddress: streetAddress.trim(),
+      country: country.trim(),
+      city: city.trim(),
+      state: state.trim(),
+      zipCode: zipCode.trim(),
+      hasBehaviouralNeeds: Boolean(hasBehaviouralNeeds),
+      behaviouralNeedsDetails: hasBehaviouralNeeds ? (behaviouralNeedsDetails || '').trim() : '',
+      socialMediaConsent: Boolean(socialMediaConsent),
+      hearAboutUs: source,
+    });
+
+    if (parentUserId) {
+      await ParentProfile.findOneAndUpdate(
+        { user: parentUserId },
+        { $addToSet: { children: studentUser._id } }
+      );
     }
   }
 
@@ -221,7 +240,9 @@ exports.createCustomer = catchAsync(async (req, res, next) => {
  * GET /api/v1/customers/:id
  */
 exports.getCustomer = catchAsync(async (req, res, next) => {
-  const customer = await Customer.findById(req.params.id).populate('assignedTo', 'fullName email');
+  const customer = await Customer.findById(req.params.id)
+    .populate('assignedTo', 'fullName email')
+    .populate('branch', 'name code city');
   if (!customer) return next(new AppError('Customer not found.', 404));
   return sendResponse(res, 200, 'Customer fetched successfully.', customer);
 });
@@ -236,6 +257,20 @@ exports.updateCustomer = catchAsync(async (req, res, next) => {
   const existing = await Customer.findById(req.params.id);
   if (!existing) return next(new AppError('Customer not found.', 404));
 
+  if (req.body.branch !== undefined || req.body.primaryBranch !== undefined) {
+    const bId = req.body.branch || req.body.primaryBranch;
+    if (bId) {
+      const Branch = require('../models/Branch');
+      const branchDoc = await Branch.findById(bId);
+      if (!branchDoc || !branchDoc.isActive) {
+        return next(new AppError('Invalid or inactive branch selected.', 400));
+      }
+      req.body.branch = branchDoc._id;
+    } else {
+      req.body.branch = null;
+    }
+  }
+
   if (req.body.firstName !== undefined || req.body.lastName !== undefined) {
     const newFirst = req.body.firstName !== undefined ? req.body.firstName : (existing.firstName || '');
     const newLast = req.body.lastName !== undefined ? req.body.lastName : (existing.lastName || '');
@@ -245,7 +280,7 @@ exports.updateCustomer = catchAsync(async (req, res, next) => {
   const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, {
     new: true,
     runValidators: true,
-  }).populate('assignedTo', 'fullName email');
+  }).populate('assignedTo', 'fullName email').populate('branch', 'name code city');
 
   return sendResponse(res, 200, 'Customer updated successfully.', customer);
 });

@@ -4,3 +4,6 @@ npm-debug.log
 logs/
 *.log
 .DS_Store
+run_migrate*.js
+check_db_leads.js
+test_checkout.js

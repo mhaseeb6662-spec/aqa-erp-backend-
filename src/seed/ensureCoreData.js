@@ -99,48 +99,80 @@ const ensureCoreData = async () => {
   const Branch = require('../models/Branch');
   const Program = require('../models/Program');
 
-  // Seed default branches if empty
+  // Seed default branches if empty, or ensure Dubai, Fujairah, and W&B exist
   const branchCount = await Branch.countDocuments();
   let defaultBranches = [];
   if (branchCount === 0) {
     defaultBranches = await Branch.insertMany([
       {
-        name: 'Main Marina Branch',
-        code: 'BR-MARINA',
-        address: '100 Ocean Promenade, Marina Hub',
-        city: 'Miami',
-        phone: '+1 (555) 019-2831',
-        email: 'marina@aquafishing.academy',
+        name: 'Dubai',
+        code: 'DXB',
+        address: 'Dubai Marina Hub, Dubai, UAE',
+        city: 'Dubai',
+        phone: '+971 4 399 1234',
+        email: 'dubai@aquafishing.academy',
         facilities: ['Deep Sea Simulator', 'Boat Dock', 'Equipment Rental', 'Pro Shop', 'Locker Room'],
         operatingHours: 'Mon-Sat: 07:00 AM - 08:00 PM',
         capacity: 100,
+        isActive: true,
       },
       {
-        name: 'Coastal Bay Academy',
-        code: 'BR-BAY',
-        address: '45 Bayfront Drive, Saltwater Cove',
-        city: 'Tampa',
-        phone: '+1 (555) 018-9920',
-        email: 'coastalbay@aquafishing.academy',
+        name: 'Fujairah',
+        code: 'FUJ',
+        address: 'Fujairah Port & Marine Club, Fujairah, UAE',
+        city: 'Fujairah',
+        phone: '+971 9 222 5678',
+        email: 'fujairah@aquafishing.academy',
         facilities: ['Kayak Launch', 'Junior Training Tank', 'Seminar Hall', 'Cafeteria'],
         operatingHours: 'Tue-Sun: 08:00 AM - 06:00 PM',
         capacity: 60,
+        isActive: true,
       },
       {
-        name: 'Deep Blue Pier Center',
-        code: 'BR-PIER',
-        address: '77 Harbour Pier Way',
-        city: 'Key West',
-        phone: '+1 (555) 017-4433',
-        email: 'deepblue@aquafishing.academy',
+        name: 'W&B',
+        code: 'WNB',
+        address: 'Water & Beyond Marine Base, Dubai, UAE',
+        city: 'Dubai',
+        phone: '+971 4 388 9012',
+        email: 'wb@aquafishing.academy',
         facilities: ['Charter Boat Fleet', 'Spearfishing Vault', 'Night Rigging Lab'],
         operatingHours: 'Mon-Sun: 06:00 AM - 09:00 PM',
         capacity: 80,
+        isActive: true,
       },
     ]);
-    console.log('[Seed] Default branches created.');
+    console.log('[Seed] Default active branches created: Dubai, Fujairah, W&B.');
   } else {
-    defaultBranches = await Branch.find();
+    // In-place migration for legacy demo branch names if any exist
+    await Branch.updateOne(
+      { $or: [{ name: 'Main Marina Branch' }, { code: 'BR-MARINA' }] },
+      { $set: { name: 'Dubai', code: 'DXB', city: 'Dubai', address: 'Dubai Marina Hub, Dubai, UAE', phone: '+971 4 399 1234', email: 'dubai@aquafishing.academy', isActive: true } }
+    );
+    await Branch.updateOne(
+      { $or: [{ name: 'Coastal Bay Academy' }, { code: 'BR-BAY' }] },
+      { $set: { name: 'Fujairah', code: 'FUJ', city: 'Fujairah', address: 'Fujairah Port & Marine Club, Fujairah, UAE', phone: '+971 9 222 5678', email: 'fujairah@aquafishing.academy', isActive: true } }
+    );
+    await Branch.updateOne(
+      { $or: [{ name: 'Deep Blue Pier Center' }, { code: 'BR-PIER' }] },
+      { $set: { name: 'W&B', code: 'WNB', city: 'Dubai', address: 'Water & Beyond Marine Base, Dubai, UAE', phone: '+971 4 388 9012', email: 'wb@aquafishing.academy', isActive: true } }
+    );
+
+    defaultBranches = await Branch.find({ isActive: true });
+
+    // Normalize legacy user branch strings to native ObjectIds
+    const dubaiBranch = defaultBranches.find((b) => b.code === 'DXB');
+    if (dubaiBranch) {
+      await User.updateMany(
+        { branch: { $in: ['Main Branch', 'Palm', 'Main Marina Branch'] } },
+        { $set: { branch: dubaiBranch._id } }
+      );
+      const hexUsers = await User.collection.find({ branch: { $type: 'string' } }).toArray();
+      for (const u of hexUsers) {
+        if (mongoose.Types.ObjectId.isValid(u.branch)) {
+          await User.collection.updateOne({ _id: u._id }, { $set: { branch: new mongoose.Types.ObjectId(u.branch) } });
+        }
+      }
+    }
   }
 
   // Seed default programs if empty

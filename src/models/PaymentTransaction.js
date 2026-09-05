@@ -24,7 +24,7 @@ const paymentTransactionSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['Credit Card', 'Debit Card', 'Physical Card / POS Machine', 'Cash', 'Bank Transfer', 'Online Payment', 'Stripe Gateway', 'PayPal', 'Apple Pay', 'Google Pay', 'Online Gateway'],
+      enum: ['Credit Card', 'Debit Card', 'Physical Card / POS Machine', 'Cash', 'Bank Transfer', 'Online Payment', 'Stripe Gateway', 'PayPal', 'Apple Pay', 'Google Pay', 'Online Gateway', 'Tabby', 'PayTabs', 'TotalPay'],
       default: 'Credit Card',
     },
     status: {
@@ -33,6 +33,23 @@ const paymentTransactionSchema = new mongoose.Schema(
       default: 'Completed',
     },
     approvalCode: {
+      type: String,
+      default: '',
+    },
+    provider: {
+      type: String,
+      enum: ['Manual', 'Tabby', 'PayTabs', 'TotalPay', 'Stripe', 'Other'],
+      default: 'Manual',
+    },
+    providerSessionId: {
+      type: String,
+      default: '',
+    },
+    currency: {
+      type: String,
+      default: 'AED',
+    },
+    failureReason: {
       type: String,
       default: '',
     },

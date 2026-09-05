@@ -6,7 +6,6 @@ const userRoutes = require('./userRoutes');
 const roleRoutes = require('./roleRoutes');
 const branchRoutes = require('./branchRoutes');
 const programRoutes = require('./programRoutes');
-const subjectRoutes = require('./subjectRoutes');
 
 // CRM
 const leadRoutes = require('./leadRoutes');
@@ -42,7 +41,6 @@ router.use('/users', userRoutes);
 router.use('/roles', roleRoutes);
 router.use('/branches', branchRoutes);
 router.use('/programs', programRoutes);
-router.use('/subjects', subjectRoutes);
 
 router.use('/leads', leadRoutes);
 router.use('/customers', customerRoutes);
@@ -91,5 +89,8 @@ router.use('/integrations', integrationRoutes);
 // Phase 9 - Reports & Analytics
 const reportRoutes = require('./reportRoutes');
 router.use('/reports', reportRoutes);
+
+const paymentRoutes = require('./paymentRoutes');
+router.use('/payments', paymentRoutes);
 
 module.exports = router;

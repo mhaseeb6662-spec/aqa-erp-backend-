@@ -18,6 +18,7 @@ const equipmentSchema = new mongoose.Schema(
       unique: true,
       sparse: true,
       trim: true,
+      default: () => 'EQ-' + Math.floor(100000 + Math.random() * 900000),
     },
     sku: {
       type: String,
@@ -27,6 +28,11 @@ const equipmentSchema = new mongoose.Schema(
     category: {
       type: String,
       required: true,
+      trim: true,
+    },
+    description: {
+      type: String,
+      default: '',
       trim: true,
     },
     branch: {

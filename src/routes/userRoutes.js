@@ -18,7 +18,7 @@ router.post(
   requirePermission(PERMISSIONS.USERS_CREATE),
   [
     body('fullName').trim().notEmpty().withMessage('Full name is required.'),
-    body('email').isEmail().withMessage('A valid email is required.').normalizeEmail(),
+    body('email').optional({ checkFalsy: true }).isEmail().withMessage('A valid email is required if provided.').normalizeEmail(),
     body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters.'),
     body('role').notEmpty().withMessage('A role must be assigned.'),
   ],

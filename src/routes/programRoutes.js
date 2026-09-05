@@ -19,4 +19,8 @@ router
   .put(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.updateProgram)
   .delete(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.deleteProgram);
 
+router
+  .route('/:id/dependencies')
+  .get(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.checkProgramDependencies);
+
 module.exports = router;

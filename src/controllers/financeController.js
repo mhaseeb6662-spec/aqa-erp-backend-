@@ -1,5 +1,6 @@
 const Invoice = require('../models/Invoice');
 const PaymentTransaction = require('../models/PaymentTransaction');
+const PaymentGatewayService = require('../integrations/PaymentGatewayService');
 const Refund = require('../models/Refund');
 const Receipt = require('../models/Receipt');
 const User = require('../models/User');
@@ -652,9 +653,59 @@ exports.processRefund = async (req, res, next) => {
 
     const payment = await PaymentTransaction.findById(paymentId);
     if (!payment) return next(new AppError('Payment transaction not found', 404));
+    if (payment.status === 'Refunded') {
+      return next(new AppError('Payment has already been fully refunded', 400));
+    }
 
-    const refundAmount = Number(amount) || payment.amount;
+    const existingRefunds = await Refund.find({ payment: payment._id, status: 'Processed' });
+    const alreadyRefunded = existingRefunds.reduce((sum, r) => sum + (r.amount || 0), 0);
+    const refundableBalance = Math.max(0, payment.amount - alreadyRefunded);
+
+    const refundAmount = Number(amount) || refundableBalance;
+    if (refundAmount <= 0) {
+      return next(new AppError('Refund amount must be greater than zero', 400));
+    }
+    if (refundAmount > refundableBalance) {
+      return next(new AppError(`Refund amount (AED ${refundAmount}) exceeds remaining refundable balance (AED ${refundableBalance})`, 400));
+    }
+
     const refundId = 'REF-' + Math.floor(100000 + Math.random() * 900000);
+
+    const RefundAuditLog = require('../models/RefundAuditLog');
+
+    const isOnline = ['Tabby', 'PayTabs', 'TotalPay'].includes(payment.provider);
+    let initialRefundStatus = 'Processed';
+    let providerResult = null;
+
+    if (isOnline) {
+      const PaymentGatewayService = require('../integrations/PaymentGatewayService');
+      
+      await RefundAuditLog.create({
+        action: 'REFUND_REQUESTED',
+        user: req.user.id,
+        payment: payment._id,
+        invoice: payment.invoice,
+        amount: refundAmount,
+        providerReference: payment.provider,
+        notes: `Online refund requested via ${payment.provider}`
+      });
+
+      try {
+        providerResult = await PaymentGatewayService.refundPayment(payment._id, refundAmount, reason);
+        initialRefundStatus = 'Processed';
+      } catch (err) {
+        await RefundAuditLog.create({
+          action: 'REFUND_FAILED',
+          user: req.user.id,
+          payment: payment._id,
+          invoice: payment.invoice,
+          amount: refundAmount,
+          providerReference: payment.provider,
+          notes: `Provider refund failed: ${err.message}`
+        });
+        return next(new AppError(`Provider refund failed: ${err.message}`, 400));
+      }
+    }
 
     const refund = await Refund.create({
       refundId,
@@ -663,34 +714,96 @@ exports.processRefund = async (req, res, next) => {
       customer: payment.customer,
       amount: refundAmount,
       reason,
-      status: 'Processed',
+      status: initialRefundStatus,
       processedBy: req.user.id,
     });
 
-    payment.status = refundAmount >= payment.amount ? 'Refunded' : 'Partially Refunded';
-    await payment.save();
+    if (initialRefundStatus === 'Processed') {
+      const newTotalRefunded = alreadyRefunded + refundAmount;
+      payment.status = newTotalRefunded >= payment.amount ? 'Refunded' : 'Partially Refunded';
+      await payment.save();
 
-    if (payment.invoice) {
-      const invoice = await Invoice.findById(payment.invoice);
-      if (invoice) {
-        invoice.amountPaid = Math.max(0, invoice.amountPaid - refundAmount);
-        invoice.balanceDue = Math.max(0, invoice.totalAmount - invoice.amountPaid);
-        invoice.status = invoice.amountPaid === 0 ? 'Sent' : 'Partially Paid';
-        await invoice.save();
+      await RefundAuditLog.create({
+        action: 'REFUND_COMPLETED',
+        user: req.user.id,
+        refund: refund._id,
+        payment: payment._id,
+        invoice: payment.invoice,
+        amount: refundAmount,
+        notes: 'Refund marked as completed in database'
+      });
+
+      if (payment.invoice) {
+        const invoice = await Invoice.findById(payment.invoice).populate('student');
+        if (invoice) {
+          const oldStatus = invoice.status;
+          
+          invoice.amountRefunded = (invoice.amountRefunded || 0) + refundAmount;
+          const netPaid = invoice.amountPaid - invoice.amountRefunded;
+          
+          if (invoice.amountRefunded >= invoice.amountPaid) {
+            invoice.status = 'Refunded';
+          } else if (invoice.amountRefunded > 0) {
+            invoice.status = 'Partially Refunded';
+          } else if (netPaid >= invoice.totalAmount) {
+            invoice.status = 'Paid';
+          } else if (netPaid > 0) {
+            invoice.status = 'Partially Paid';
+          } else {
+            invoice.status = 'Sent';
+          }
+          await invoice.save();
+
+          await RefundAuditLog.create({
+            action: 'INVOICE_STATUS_UPDATED',
+            user: req.user.id,
+            refund: refund._id,
+            invoice: invoice._id,
+            oldStatus,
+            newStatus: invoice.status,
+            notes: 'Invoice status recalculated automatically'
+          });
+
+          const targetStudentId = invoice.student ? invoice.student._id.toString() : null;
+          const targetCustomerId = payment.customer ? payment.customer.toString() : null;
+
+          const recipientsToNotify = new Set();
+          if (targetStudentId) recipientsToNotify.add(targetStudentId);
+          if (targetCustomerId) recipientsToNotify.add(targetCustomerId);
+
+          for (const recipientId of recipientsToNotify) {
+            await Notification.create({
+              recipient: recipientId,
+              title: 'Refund Completed',
+              message: `Your refund of AED ${Number(refundAmount).toLocaleString()} for Invoice ${invoice.invoiceNumber} has been completed successfully.`,
+              type: 'system',
+              link: `/student/invoices/${invoice._id}`,
+            });
+
+            await RefundAuditLog.create({
+              action: 'STUDENT_REFUND_NOTIFICATION_CREATED',
+              user: req.user.id,
+              refund: refund._id,
+              invoice: invoice._id,
+              student: recipientId,
+              notes: 'Notification sent to student/parent dashboard'
+            });
+          }
+        }
+      } else {
+        await Notification.create({
+          recipient: payment.customer,
+          title: 'Refund Completed',
+          message: `Your refund of AED ${Number(refundAmount).toLocaleString()} for transaction ${payment.transactionId} has been completed successfully.`,
+          type: 'system',
+          link: '/student/history',
+        });
       }
     }
 
-    await Notification.create({
-      recipient: payment.customer,
-      title: 'Refund Processed',
-      message: `A refund of AED ${Number(refundAmount).toLocaleString()} has been processed for transaction ${payment.transactionId}.`,
-      type: 'system',
-      link: '/finance/refunds',
-    });
-
     res.status(201).json({
       success: true,
-      message: 'Refund processed successfully',
+      message: initialRefundStatus === 'Processed' ? 'Refund processed successfully' : 'Refund request submitted to provider',
       data: refund,
     });
   } catch (err) {
@@ -741,7 +854,7 @@ exports.getReceipts = async (req, res, next) => {
 exports.getFinancialDashboardMetrics = async (req, res, next) => {
   try {
     const totalPayments = await PaymentTransaction.aggregate([
-      { $match: { status: { $in: ['Completed', 'Partially Refunded'] } } },
+      { $match: { status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] } } },
       { $group: { _id: null, total: { $sum: '$amount' } } },
     ]);
 
@@ -763,6 +876,117 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
     const paymentsCount = await PaymentTransaction.countDocuments();
     const overdueCount = await Invoice.countDocuments({ status: 'Overdue' });
 
+    // --- Graph Data Calculation ---
+    const period = (req.query.graphPeriod || 'monthly').toLowerCase();
+    const timezone = '+04:00'; // UAE Timezone
+    let dateGroupId;
+
+    switch (period) {
+      case 'daily':
+        dateGroupId = { $dateToString: { format: '%Y-%m-%d', date: '$paidAt', timezone } };
+        break;
+      case 'weekly':
+        dateGroupId = { $dateToString: { format: '%G-W%V', date: '$paidAt', timezone } };
+        break;
+      case 'yearly':
+        dateGroupId = { $dateToString: { format: '%Y', date: '$paidAt', timezone } };
+        break;
+      case 'monthly':
+      default:
+        dateGroupId = { $dateToString: { format: '%Y-%m', date: '$paidAt', timezone } };
+        break;
+    }
+
+    const paymentsData = await PaymentTransaction.aggregate([
+      { $match: { status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] } } },
+      {
+        $group: {
+          _id: dateGroupId,
+          revenue: { $sum: '$amount' }
+        }
+      }
+    ]);
+
+    let refundDateGroupId;
+    switch (period) {
+      case 'daily':
+        refundDateGroupId = { $dateToString: { format: '%Y-%m-%d', date: '$processedAt', timezone } };
+        break;
+      case 'weekly':
+        refundDateGroupId = { $dateToString: { format: '%G-W%V', date: '$processedAt', timezone } };
+        break;
+      case 'yearly':
+        refundDateGroupId = { $dateToString: { format: '%Y', date: '$processedAt', timezone } };
+        break;
+      case 'monthly':
+      default:
+        refundDateGroupId = { $dateToString: { format: '%Y-%m', date: '$processedAt', timezone } };
+        break;
+    }
+
+    const refundsData = await Refund.aggregate([
+      { $match: { status: 'Processed' } },
+      {
+        $group: {
+          _id: refundDateGroupId,
+          refunds: { $sum: '$amount' }
+        }
+      }
+    ]);
+
+    const trendMap = new Map();
+    paymentsData.forEach(p => {
+      if (p._id) {
+        trendMap.set(p._id, { revenue: p.revenue, refunds: 0, netRevenue: p.revenue });
+      }
+    });
+
+    refundsData.forEach(r => {
+      if (r._id) {
+        if (trendMap.has(r._id)) {
+          const existing = trendMap.get(r._id);
+          existing.refunds += r.refunds;
+          existing.netRevenue = existing.revenue - existing.refunds;
+        } else {
+          trendMap.set(r._id, { revenue: 0, refunds: r.refunds, netRevenue: -r.refunds });
+        }
+      }
+    });
+
+    // Format chart labels and sort
+    const formatChartLabel = (granularity, rawDateStr) => {
+      try {
+        if (granularity === 'daily') {
+          const [y, m, d] = rawDateStr.split('-');
+          return new Date(y, m - 1, d).toLocaleDateString('en-AE', { day: '2-digit', month: 'short' });
+        }
+        if (granularity === 'weekly') {
+          const [y, w] = rawDateStr.split('-W');
+          return `Week ${w}, ${y}`;
+        }
+        if (granularity === 'monthly') {
+          const [y, m] = rawDateStr.split('-');
+          return new Date(y, m - 1, 1).toLocaleDateString('en-AE', { month: 'short', year: 'numeric' });
+        }
+        return rawDateStr; // yearly
+      } catch (e) {
+        return rawDateStr;
+      }
+    };
+
+    const sortedKeys = Array.from(trendMap.keys()).sort();
+    const trendData = sortedKeys.map(k => {
+      const data = trendMap.get(k);
+      return {
+        period: k,
+        label: formatChartLabel(period, k),
+        revenue: data.revenue,
+        refunds: data.refunds,
+        netRevenue: data.netRevenue,
+      };
+    });
+    // --- End Graph Data Calculation ---
+
     res.status(200).json({
       success: true,
       data: {
@@ -773,14 +997,8 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
         invoicesCount,
         paymentsCount,
         overdueCount,
-        monthlyTrend: [
-          { month: 'Jan', revenue: 4200, expenses: 1100 },
-          { month: 'Feb', revenue: 5800, expenses: 1400 },
-          { month: 'Mar', revenue: 7400, expenses: 1800 },
-          { month: 'Apr', revenue: 8900, expenses: 2100 },
-          { month: 'May', revenue: 11200, expenses: 2600 },
-          { month: 'Jun', revenue: totalRevenue > 0 ? totalRevenue : 14500, expenses: 3100 },
-        ],
+        trendData,
+        graphPeriod: period,
         categoryBreakdown: [
           { name: 'Fishing Essentials', percentage: 40, amount: Math.round(totalRevenue * 0.4) },
           { name: 'Offshore & Deep Sea', percentage: 30, amount: Math.round(totalRevenue * 0.3) },
