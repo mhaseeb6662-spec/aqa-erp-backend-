@@ -17,6 +17,10 @@ const ProgressNote = require('../models/ProgressNote');
 const SessionReport = require('../models/SessionReport');
 const KpiDefinition = require('../models/KpiDefinition');
 const ManagementAlert = require('../models/ManagementAlert');
+const Customer = require('../models/Customer');
+const StudentProfile = require('../models/StudentProfile');
+const ParentProfile = require('../models/ParentProfile');
+const sendResponse = require('../utils/apiResponse');
 const AppError = require('../utils/appError');
 const { PIPELINE_STAGE_CONFIG } = require('../config/crm.constants');
 
@@ -1381,68 +1385,196 @@ exports.getCustomerRevenue = async (req, res, next) => {
     const { customerId } = req.query;
     if (!customerId) return next(new AppError('Customer ID is required', 400));
 
-    const dates = parseDateFilters(req.query);
-    const curDateMatch = (dates.current.start && dates.current.end) 
-      ? { createdAt: { $gte: dates.current.start, $lte: dates.current.end } } 
-      : {};
-
-    const { Types } = require('mongoose');
     let custIdObj;
     try {
-      custIdObj = new Types.ObjectId(customerId);
+      custIdObj = new mongoose.Types.ObjectId(customerId);
     } catch (e) {
       return next(new AppError('Invalid Customer ID format', 400));
     }
 
-    const branchMatch = req.query.branchId ? { 'invoiceData.branch': new Types.ObjectId(req.query.branchId) } : {};
+    const allRelatedIds = new Set([custIdObj.toString()]);
 
-    const branchLookup = req.query.branchId ? [
-      {
-        $lookup: {
-          from: 'invoices',
-          localField: 'invoice',
-          foreignField: '_id',
-          as: 'invoiceData'
-        }
-      },
-      { $unwind: { path: '$invoiceData', preserveNullAndEmptyArrays: false } },
-      { $match: branchMatch }
-    ] : [];
+    // 1. Resolve Customer CRM document (if target is Customer._id)
+    const customer = await Customer.findById(custIdObj);
+    if (customer) {
+      const queryOr = [];
+      if (customer.email) queryOr.push({ email: customer.email.trim().toLowerCase() });
+      if (customer.phone) queryOr.push({ phone: customer.phone.trim() });
+      if (customer.parentEmail) queryOr.push({ email: customer.parentEmail.trim().toLowerCase() });
+      if (customer.parentPhone) queryOr.push({ phone: customer.parentPhone.trim() });
 
-    const [paymentsAgg, refundsAgg] = await Promise.all([
-      PaymentTransaction.aggregate([
-        { 
-          $match: { 
-            customer: custIdObj,
-            status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] },
-            ...curDateMatch
-          } 
-        },
-        ...branchLookup,
-        { $group: { _id: null, total: { $sum: '$amount' } } }
-      ]),
-      Refund.aggregate([
-        { 
-          $match: { 
-            customer: custIdObj,
-            status: 'Processed',
-            ...curDateMatch
-          } 
-        },
-        ...branchLookup,
-        { $group: { _id: null, total: { $sum: '$amount' } } }
-      ])
+      if (queryOr.length > 0) {
+        const users = await User.find({ $or: queryOr }).select('_id');
+        users.forEach(u => allRelatedIds.add(u._id.toString()));
+      }
+    }
+
+    // 2. Resolve User document (if target is User._id)
+    const user = await User.findById(custIdObj);
+    if (user) {
+      const queryOr = [];
+      if (user.email) queryOr.push({ email: user.email.trim().toLowerCase() });
+      if (user.phone) queryOr.push({ phone: user.phone.trim() });
+      if (queryOr.length > 0) {
+        const custs = await Customer.find({ $or: queryOr }).select('_id');
+        custs.forEach(c => allRelatedIds.add(c._id.toString()));
+      }
+    }
+
+    // 3. Expand student/parent relations across all resolved entity IDs
+    const currentIds = Array.from(allRelatedIds).map(id => new mongoose.Types.ObjectId(id));
+    
+    const [studentProfiles, parentProfiles] = await Promise.all([
+      StudentProfile.find({
+        $or: [
+          { user: { $in: currentIds } },
+          { _id: custIdObj }
+        ]
+      }).select('user parentUser'),
+      ParentProfile.find({
+        $or: [
+          { user: { $in: currentIds } },
+          { _id: custIdObj }
+        ]
+      }).select('user children')
     ]);
 
-    const totalPayments = paymentsAgg[0]?.total || 0;
-    const totalRefunds = refundsAgg[0]?.total || 0;
-    const netRevenue = totalPayments - totalRefunds;
+    for (const sp of studentProfiles) {
+      if (sp.user) allRelatedIds.add(sp.user.toString());
+      if (sp.parentUser) {
+        allRelatedIds.add(sp.parentUser.toString());
+        const siblings = await StudentProfile.find({ parentUser: sp.parentUser }).select('user');
+        siblings.forEach(sib => allRelatedIds.add(sib.user.toString()));
+      }
+    }
+
+    for (const pp of parentProfiles) {
+      if (pp.user) allRelatedIds.add(pp.user.toString());
+      if (pp.children && Array.isArray(pp.children)) {
+        pp.children.forEach(ch => allRelatedIds.add(ch.toString()));
+      }
+    }
+
+    const finalIdList = Array.from(allRelatedIds).map(id => new mongoose.Types.ObjectId(id));
+
+    // 4. Resolve Bookings for any related student/parent
+    const bookings = await Booking.find({
+      $or: [
+        { student: { $in: finalIdList } },
+        { parent: { $in: finalIdList } }
+      ]
+    }).select('_id');
+    const bookingIds = bookings.map(b => b._id);
+
+    // 5. Invoices & Branch Scoping
+    const invoiceOr = [
+      { customer: { $in: finalIdList } },
+      { student: { $in: finalIdList } }
+    ];
+    if (bookingIds.length > 0) {
+      invoiceOr.push({ booking: { $in: bookingIds } });
+    }
+
+    const invoiceQuery = { $or: invoiceOr };
+
+    // Respect branch filter if supplied or if user has restricted branch scope
+    let activeBranchId = req.query.branchId;
+    if (!activeBranchId && req.user && req.user.branch && !['admin', 'super-admin', 'ceo'].includes(req.user.role?.slug)) {
+      activeBranchId = req.user.branch;
+    }
+
+    if (activeBranchId && activeBranchId !== 'all') {
+      try {
+        invoiceQuery.branch = new mongoose.Types.ObjectId(activeBranchId);
+      } catch (e) {
+        // invalid branch ID string, ignore
+      }
+    }
+
+    const invoices = await Invoice.find(invoiceQuery).select('_id branch totalAmount amountPaid balanceDue status');
+    const invoiceIds = invoices.map(i => i._id);
+
+    // 6. Date Range Scoping
+    const dates = parseDateFilters(req.query);
+    const dateRangeActive = Boolean(dates.current.start && dates.current.end);
+    const paymentDateMatch = dateRangeActive ? {
+      $or: [
+        { paidAt: { $gte: dates.current.start, $lte: dates.current.end } },
+        { createdAt: { $gte: dates.current.start, $lte: dates.current.end } }
+      ]
+    } : null;
+
+    const refundDateMatch = dateRangeActive ? {
+      $or: [
+        { processedAt: { $gte: dates.current.start, $lte: dates.current.end } },
+        { createdAt: { $gte: dates.current.start, $lte: dates.current.end } }
+      ]
+    } : null;
+
+    // 7. Aggregate Payments (status: Completed, Partially Refunded, Refunded)
+    const paymentOr = [
+      { customer: { $in: finalIdList } }
+    ];
+    if (invoiceIds.length > 0) {
+      paymentOr.push({ invoice: { $in: invoiceIds } });
+    }
+
+    const paymentConditions = [
+      { $or: paymentOr },
+      { status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] } }
+    ];
+    if (paymentDateMatch) {
+      paymentConditions.push(paymentDateMatch);
+    }
+
+    const payments = await PaymentTransaction.find({ $and: paymentConditions }).select('_id amount paidAt createdAt status');
+    const paymentIds = payments.map(p => p._id);
+
+    // 8. Aggregate Refunds (status: Processed)
+    const refundOr = [
+      { customer: { $in: finalIdList } }
+    ];
+    if (invoiceIds.length > 0) {
+      refundOr.push({ invoice: { $in: invoiceIds } });
+    }
+    if (paymentIds.length > 0) {
+      refundOr.push({ payment: { $in: paymentIds } });
+    }
+
+    const refundConditions = [
+      { $or: refundOr },
+      { status: 'Processed' }
+    ];
+    if (refundDateMatch) {
+      refundConditions.push(refundDateMatch);
+    }
+
+    const refunds = await Refund.find({ $and: refundConditions }).select('_id amount processedAt createdAt status');
+
+    // 9. Computations: Real collected revenue & refunds
+    const grossRevenue = payments.reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
+    const totalRefunds = refunds.reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
+    const netRevenue = Math.max(0, grossRevenue - totalRefunds);
+
+    let lastPaymentDate = null;
+    if (payments.length > 0) {
+      const sortedDates = payments
+        .map(p => p.paidAt || p.createdAt)
+        .filter(Boolean)
+        .sort((a, b) => new Date(b) - new Date(a));
+      lastPaymentDate = sortedDates[0] || null;
+    }
 
     return sendResponse(res, 200, 'Customer revenue calculated successfully', {
       customerId,
-      totalPayments,
-      totalRefunds,
-      netRevenue,
+      grossRevenue: Number(grossRevenue.toFixed(2)),
+      totalPayments: Number(grossRevenue.toFixed(2)),
+      refunds: Number(totalRefunds.toFixed(2)),
+      totalRefunds: Number(totalRefunds.toFixed(2)),
+      netRevenue: Number(netRevenue.toFixed(2)),
+      totalRevenue: Number(netRevenue.toFixed(2)),
+      paidTransactionsCount: payments.length,
+      lastPaymentDate
     });
   } catch (err) {
     next(err);
