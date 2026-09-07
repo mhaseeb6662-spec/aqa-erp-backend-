@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Invoice = require('../models/Invoice');
 const PaymentTransaction = require('../models/PaymentTransaction');
 const PaymentGatewayService = require('../integrations/PaymentGatewayService');
@@ -670,6 +671,7 @@ exports.getEligibleRefundTransactions = async (req, res, next) => {
     const { search, branch, page = 1, limit = 50 } = req.query;
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+    const cleanSearch = (search || '').trim();
 
     // 1. Backfill any historical 'Paid' / 'Partially Paid' invoices that lack a PaymentTransaction
     const paidInvoicesWithoutTxn = await Invoice.find({
@@ -699,24 +701,114 @@ exports.getEligibleRefundTransactions = async (req, res, next) => {
       status: { $in: ['Completed', 'Partially Refunded', 'Succeeded', 'Settled'] },
     };
 
-    if (req.user.role?.slug === 'student' || req.user.role?.slug === 'parent') {
-      paymentFilter.customer = req.user.id;
+    // RBAC customer/student/parent scoping
+    if (req.user.role?.slug === 'student') {
+      paymentFilter.$or = [{ customer: req.user.id }];
+    } else if (req.user.role?.slug === 'parent') {
+      const ParentProfile = require('../models/ParentProfile');
+      const pProfile = await ParentProfile.findOne({ user: req.user.id }).lean();
+      const childIds = pProfile?.children || [];
+      paymentFilter.customer = { $in: [req.user.id, ...childIds] };
+    }
+
+    // Branch scoping
+    const isSuperAdmin = ['super-admin', 'super_admin', 'admin'].includes(req.user.role?.slug);
+    if (branch) {
+      const branchInvoices = await Invoice.find({ branch }).select('_id').lean();
+      paymentFilter.invoice = { $in: branchInvoices.map((b) => b._id) };
+    } else if (
+      !isSuperAdmin &&
+      req.user.branch &&
+      req.user.branch !== 'All Branches' &&
+      req.user.branch !== 'Main Branch'
+    ) {
+      const branchInvoices = await Invoice.find({ branch: req.user.branch }).select('_id').lean();
+      paymentFilter.invoice = { $in: branchInvoices.map((b) => b._id) };
+    }
+
+    // 3. Dynamic Server-Side Search Filtering across real relationships
+    if (cleanSearch) {
+      const ParentProfile = require('../models/ParentProfile');
+      const escaped = cleanSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const searchRegex = new RegExp(escaped, 'i');
+
+      // A. Search Users by name, code, phone, email
+      const matchedUsers = await User.find({
+        $or: [
+          { fullName: searchRegex },
+          { studentCode: searchRegex },
+          { email: searchRegex },
+          { phone: searchRegex },
+        ],
+      })
+        .select('_id fullName')
+        .lean();
+
+      const matchedUserObjectIds = matchedUsers.map((u) => u._id);
+
+      // B. Resolve Parent-Child Relationships (Parent <-> Students)
+      const parentProfiles = await ParentProfile.find({
+        $or: [{ user: { $in: matchedUserObjectIds } }, { children: { $in: matchedUserObjectIds } }],
+      }).lean();
+
+      const allRelatedUserIds = new Set(matchedUserObjectIds.map((id) => id.toString()));
+      for (const pp of parentProfiles) {
+        if (pp.user) allRelatedUserIds.add(pp.user.toString());
+        if (Array.isArray(pp.children)) {
+          for (const ch of pp.children) {
+            if (ch) allRelatedUserIds.add(ch.toString());
+          }
+        }
+      }
+      const relatedUserObjectIds = Array.from(allRelatedUserIds).map((id) =>
+        mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+      );
+
+      // C. Search Invoices by invoiceNumber or linked customer/student
+      const invoiceSearchFilter = {
+        $or: [
+          { invoiceNumber: searchRegex },
+          { customer: { $in: relatedUserObjectIds } },
+          { student: { $in: relatedUserObjectIds } },
+        ],
+      };
+      if (branch) invoiceSearchFilter.branch = branch;
+
+      const matchedInvoices = await Invoice.find(invoiceSearchFilter).select('_id invoiceNumber').lean();
+      const matchedInvoiceObjectIds = matchedInvoices.map((inv) => inv._id);
+
+      // D. Combine into PaymentTransaction search clauses
+      const searchClauses = [
+        { transactionId: searchRegex },
+        { approvalCode: searchRegex },
+        { gatewayReference: searchRegex },
+        { providerSessionId: searchRegex },
+        { customer: { $in: relatedUserObjectIds } },
+        { invoice: { $in: matchedInvoiceObjectIds } },
+      ];
+
+      if (paymentFilter.$or) {
+        paymentFilter.$and = [{ $or: paymentFilter.$or }, { $or: searchClauses }];
+        delete paymentFilter.$or;
+      } else {
+        paymentFilter.$or = searchClauses;
+      }
     }
 
     // Fetch payments sorted latest first
     const payments = await PaymentTransaction.find(paymentFilter)
-      .populate('customer', 'fullName email phone')
+      .populate('customer', 'fullName email phone studentCode')
       .populate({
         path: 'invoice',
-        select: 'invoiceNumber totalAmount amountPaid amountRefunded status branch student',
-        populate: {
-          path: 'student',
-          select: 'fullName email',
-        },
+        select: 'invoiceNumber totalAmount amountPaid amountRefunded status branch student customer',
+        populate: [
+          { path: 'student', select: 'fullName email phone studentCode' },
+          { path: 'customer', select: 'fullName email phone' },
+        ],
       })
       .sort({ paidAt: -1, createdAt: -1 });
 
-    // 3. Pre-fetch all processed refunds for these payments in one query
+    // 4. Pre-fetch all processed refunds for these payments in one batch query
     const paymentIds = payments.map((p) => p._id);
     const allRefunds = await Refund.find({
       payment: { $in: paymentIds },
@@ -729,37 +821,24 @@ exports.getEligibleRefundTransactions = async (req, res, next) => {
       refundMap[pid] = (refundMap[pid] || 0) + (r.amount || 0);
     }
 
-    const eligibleList = [];
+    let eligibleList = [];
 
     for (const p of payments) {
       const alreadyRefunded = refundMap[p._id.toString()] || 0;
       const remainingRefundable = Math.max(0, p.amount - alreadyRefunded);
 
-      // Skip fully refunded transactions
+      // Strictly exclude fully refunded transactions
       if (remainingRefundable <= 0) continue;
 
-      // Optional branch filter
+      // Optional branch filter validation
       if (branch && p.invoice?.branch && p.invoice.branch.toString() !== branch.toString()) {
         continue;
       }
 
       const invNum = p.invoice?.invoiceNumber || 'N/A';
-      const custName = p.customer?.fullName || 'N/A';
-      const custEmail = p.customer?.email || '';
+      const custName = p.customer?.fullName || p.invoice?.customer?.fullName || 'N/A';
+      const custEmail = p.customer?.email || p.invoice?.customer?.email || '';
       const stuName = p.invoice?.student?.fullName || custName;
-
-      // Search filter
-      if (search && search.trim()) {
-        const q = search.trim().toLowerCase();
-        const match =
-          p.transactionId.toLowerCase().includes(q) ||
-          invNum.toLowerCase().includes(q) ||
-          custName.toLowerCase().includes(q) ||
-          custEmail.toLowerCase().includes(q) ||
-          stuName.toLowerCase().includes(q);
-
-        if (!match) continue;
-      }
 
       eligibleList.push({
         id: p._id,
@@ -782,6 +861,25 @@ exports.getEligibleRefundTransactions = async (req, res, next) => {
       });
     }
 
+    // 5. Prioritize exact matches if search is provided
+    if (cleanSearch) {
+      const qLower = cleanSearch.toLowerCase();
+      eligibleList.sort((a, b) => {
+        const aExact =
+          a.transactionId.toLowerCase() === qLower ||
+          a.invoiceNumber.toLowerCase() === qLower ||
+          a.customerName.toLowerCase() === qLower;
+        const bExact =
+          b.transactionId.toLowerCase() === qLower ||
+          b.invoiceNumber.toLowerCase() === qLower ||
+          b.customerName.toLowerCase() === qLower;
+
+        if (aExact && !bExact) return -1;
+        if (!aExact && bExact) return 1;
+        return new Date(b.paidAt || b.createdAt) - new Date(a.paidAt || a.createdAt);
+      });
+    }
+
     const total = eligibleList.length;
     const startIndex = (pageNum - 1) * limitNum;
     const paginatedData = eligibleList.slice(startIndex, startIndex + limitNum);
@@ -792,6 +890,7 @@ exports.getEligibleRefundTransactions = async (req, res, next) => {
       total,
       page: pageNum,
       limit: limitNum,
+      search: cleanSearch,
       data: paginatedData,
     });
   } catch (err) {

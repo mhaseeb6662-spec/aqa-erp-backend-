@@ -107,4 +107,7 @@ const invoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+invoiceSchema.index({ customer: 1, student: 1, status: 1 });
+invoiceSchema.index({ branch: 1, status: 1 });
+
 module.exports = mongoose.model('Invoice', invoiceSchema);

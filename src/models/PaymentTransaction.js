@@ -105,4 +105,8 @@ const paymentTransactionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+paymentTransactionSchema.index({ customer: 1, invoice: 1, status: 1, paidAt: -1 });
+paymentTransactionSchema.index({ approvalCode: 1 });
+paymentTransactionSchema.index({ status: 1, paidAt: -1 });
+
 module.exports = mongoose.model('PaymentTransaction', paymentTransactionSchema);

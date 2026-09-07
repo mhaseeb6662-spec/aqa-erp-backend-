@@ -160,4 +160,6 @@ userSchema.methods.toSafeObject = function toSafeObject() {
   return obj;
 };
 
+userSchema.index({ fullName: 1 });
+
 module.exports = mongoose.model('User', userSchema);
