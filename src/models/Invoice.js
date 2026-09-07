@@ -1,10 +1,24 @@
 const mongoose = require('mongoose');
 
 const lineItemSchema = new mongoose.Schema({
-  description: { type: String, required: true, trim: true },
+  item: { type: String, trim: true, default: '' },
+  description: { type: String, default: '', trim: true },
   quantity: { type: Number, default: 1, min: 1 },
   unitPrice: { type: Number, required: true, min: 0 },
   amount: { type: Number, required: true, min: 0 },
+  discount: {
+    type: { type: String, enum: ['fixed', 'percentage'], default: 'fixed' },
+    value: { type: Number, default: 0 },
+    amount: { type: Number, default: 0 },
+  },
+  validity: { type: Date, default: null },
+  taxRate: { type: Number, default: 0 },
+  taxAmount: { type: Number, default: 0 },
+  program: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Program',
+    default: null,
+  },
 });
 
 const invoiceSchema = new mongoose.Schema(
@@ -20,6 +34,11 @@ const invoiceSchema = new mongoose.Schema(
       required: [true, 'Customer reference is required'],
     },
     student: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    invoicedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       default: null,
@@ -45,6 +64,10 @@ const invoiceSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    totalExcludingTax: {
+      type: Number,
+      default: 0,
+    },
     taxRate: {
       type: Number,
       default: 5, // 5% tax default
@@ -54,6 +77,14 @@ const invoiceSchema = new mongoose.Schema(
       default: 0,
     },
     discount: {
+      type: Number,
+      default: 0,
+    },
+    coupon: {
+      code: { type: String, default: '' },
+      discountAmount: { type: Number, default: 0 },
+    },
+    roundingAdjustment: {
       type: Number,
       default: 0,
     },

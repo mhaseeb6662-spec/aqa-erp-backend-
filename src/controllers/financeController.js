@@ -28,7 +28,8 @@ exports.getInvoices = async (req, res, next) => {
 
     const invoices = await Invoice.find(filter)
       .populate('customer', 'fullName email phone')
-      .populate('student', 'fullName email')
+      .populate('student', 'fullName email phone studentCode')
+      .populate('invoicedBy', 'fullName email role')
       .populate('program', 'title code price')
       .populate('branch', 'name code city')
       .sort({ createdAt: -1 });
@@ -47,7 +48,8 @@ exports.getInvoiceById = async (req, res, next) => {
   try {
     const invoice = await Invoice.findById(req.params.id)
       .populate('customer', 'fullName email phone branch address')
-      .populate('student', 'fullName email phone branch')
+      .populate('student', 'fullName email phone branch studentCode')
+      .populate('invoicedBy', 'fullName email role')
       .populate('booking', 'bookingId sessionDate slotTime bookingType status')
       .populate('program', 'title code price category duration')
       .populate('branch', 'name code city address phone email');
@@ -88,60 +90,200 @@ exports.getInvoiceById = async (req, res, next) => {
 
 exports.createInvoice = async (req, res, next) => {
   try {
-    const { customerId, studentId, programId, branchId, lineItems, taxRate, discount, dueDate, notes } = req.body;
+    const {
+      customerId,
+      studentId,
+      invoicedById,
+      customInvoiceNumber,
+      invoiceNumber: reqInvoiceNumber,
+      issuedDate,
+      dueDate,
+      lineItems,
+      coupon,
+      roundingAdjustment,
+      programId,
+      branchId,
+      taxRate,
+      discount,
+      notes,
+    } = req.body;
 
-    if (!customerId || !lineItems || lineItems.length === 0) {
-      return next(new AppError('Please select a customer and add at least one line item', 400));
+    // Student / Customer resolution
+    const targetStudentId = studentId || customerId;
+    if (!targetStudentId) {
+      return next(new AppError('Please select a student to invoice', 400));
     }
 
-    const invoiceNumber = 'INV-' + Math.floor(100000 + Math.random() * 900000);
+    if (!lineItems || !Array.isArray(lineItems) || lineItems.length === 0) {
+      return next(new AppError('Please add at least one line item to the invoice', 400));
+    }
 
-    const computedItems = lineItems.map((item) => ({
-      description: item.description,
-      quantity: Number(item.quantity) || 1,
-      unitPrice: Number(item.unitPrice) || 0,
-      amount: (Number(item.quantity) || 1) * (Number(item.unitPrice) || 0),
-    }));
+    // Resolve Customer / Payer:
+    let targetCustomerId = customerId;
+    if (!targetCustomerId) {
+      const ParentProfile = require('../models/ParentProfile');
+      const parentProfile = await ParentProfile.findOne({ children: targetStudentId }).lean();
+      if (parentProfile && parentProfile.user) {
+        targetCustomerId = parentProfile.user;
+      } else {
+        targetCustomerId = targetStudentId;
+      }
+    }
 
-    const subtotal = computedItems.reduce((sum, item) => sum + item.amount, 0);
-    const taxValue = Number(taxRate) >= 0 ? Number(taxRate) : 5;
-    const taxAmount = (subtotal * taxValue) / 100;
-    const discountVal = Number(discount) || 0;
-    const totalAmount = Math.max(0, subtotal + taxAmount - discountVal);
+    // Invoice number generation
+    let finalInvoiceNumber = (customInvoiceNumber || reqInvoiceNumber || '').trim();
+    if (!finalInvoiceNumber) {
+      const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+      finalInvoiceNumber = `AFA-${randomSuffix}`;
+      let exists = await Invoice.findOne({ invoiceNumber: finalInvoiceNumber });
+      while (exists) {
+        const nextSuffix = Math.floor(1000 + Math.random() * 9000);
+        finalInvoiceNumber = `AFA-${nextSuffix}`;
+        exists = await Invoice.findOne({ invoiceNumber: finalInvoiceNumber });
+      }
+    } else {
+      const exists = await Invoice.findOne({ invoiceNumber: finalInvoiceNumber });
+      if (exists) {
+        return next(new AppError(`Invoice number ${finalInvoiceNumber} already exists. Please use a unique number.`, 400));
+      }
+    }
+
+    // Parse and compute line items
+    let subtotal = 0;
+    let totalItemDiscounts = 0;
+    let totalTaxAmount = 0;
+
+    const computedItems = lineItems.map((item, idx) => {
+      const title = (item.item || item.description || `Item #${idx + 1}`).trim();
+      const desc = (item.description || '').trim();
+      const qty = Math.max(1, Number(item.quantity) || 1);
+      const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
+      const baseAmount = qty * unitPrice;
+      subtotal += baseAmount;
+
+      // Item discount
+      let itemDiscAmount = 0;
+      let discType = 'fixed';
+      let discValue = 0;
+      if (item.discount) {
+        if (typeof item.discount === 'object') {
+          discType = item.discount.type === 'percentage' ? 'percentage' : 'fixed';
+          discValue = Math.max(0, Number(item.discount.value) || 0);
+          if (discType === 'percentage') {
+            itemDiscAmount = (baseAmount * Math.min(100, discValue)) / 100;
+          } else {
+            itemDiscAmount = Math.min(baseAmount, discValue);
+          }
+        } else {
+          discValue = Math.max(0, Number(item.discount) || 0);
+          itemDiscAmount = Math.min(baseAmount, discValue);
+        }
+      }
+      totalItemDiscounts += itemDiscAmount;
+
+      // Item tax
+      let itemTaxRate = 0;
+      if (item.taxRate !== undefined && item.taxRate !== null && item.taxRate !== '') {
+        itemTaxRate = Math.max(0, Number(item.taxRate) || 0);
+      } else if (taxRate !== undefined && taxRate !== null && taxRate !== '') {
+        itemTaxRate = Math.max(0, Number(taxRate) || 0);
+      }
+      const taxableAmount = Math.max(0, baseAmount - itemDiscAmount);
+      const itemTaxAmount = (taxableAmount * itemTaxRate) / 100;
+      totalTaxAmount += itemTaxAmount;
+
+      const finalItemAmount = Math.max(0, taxableAmount + itemTaxAmount);
+
+      return {
+        item: title,
+        description: desc,
+        quantity: qty,
+        unitPrice,
+        amount: finalItemAmount,
+        discount: {
+          type: discType,
+          value: discValue,
+          amount: itemDiscAmount,
+        },
+        validity: item.validity ? new Date(item.validity) : null,
+        taxRate: itemTaxRate,
+        taxAmount: itemTaxAmount,
+        program: item.program || null,
+      };
+    });
+
+    // Form-wide discount if any
+    const extraDiscount = Math.max(0, Number(discount) || 0);
+    const allDiscounts = totalItemDiscounts + extraDiscount;
+
+    // Coupon calculation
+    let couponDiscount = 0;
+    let couponCode = '';
+    if (coupon && typeof coupon === 'object') {
+      couponCode = (coupon.code || '').trim();
+      couponDiscount = Math.max(0, Number(coupon.discountAmount) || 0);
+    } else if (typeof coupon === 'string' && coupon.trim()) {
+      couponCode = coupon.trim();
+    }
+
+    const totalExcludingTax = Math.max(0, subtotal - allDiscounts - couponDiscount);
+    const rounding = Number(roundingAdjustment) || 0;
+    const totalAmount = Math.max(0, totalExcludingTax + totalTaxAmount + rounding);
+
+    // Invoiced By
+    const invoicedByStaff = invoicedById || req.user.id;
+
+    // Dates
+    const finalIssueDate = issuedDate ? new Date(issuedDate) : new Date();
+    const finalDueDate = dueDate ? new Date(dueDate) : new Date(finalIssueDate.getTime() + 15 * 86400000);
 
     const invoice = await Invoice.create({
-      invoiceNumber,
-      customer: customerId,
-      student: studentId || customerId,
+      invoiceNumber: finalInvoiceNumber,
+      customer: targetCustomerId,
+      student: targetStudentId,
+      invoicedBy: invoicedByStaff,
       program: programId || null,
-      branch: branchId || null,
+      branch: branchId || req.user.branch || null,
       lineItems: computedItems,
       subtotal,
-      taxRate: taxValue,
-      taxAmount,
-      discount: discountVal,
+      totalExcludingTax,
+      taxRate: Number(taxRate) >= 0 ? Number(taxRate) : 0,
+      taxAmount: totalTaxAmount,
+      discount: allDiscounts,
+      coupon: {
+        code: couponCode,
+        discountAmount: couponDiscount,
+      },
+      roundingAdjustment: rounding,
       totalAmount,
       balanceDue: totalAmount,
       amountPaid: 0,
       status: 'Sent',
-      dueDate: dueDate ? new Date(dueDate) : new Date(Date.now() + 15 * 86400000),
+      issuedDate: finalIssueDate,
+      dueDate: finalDueDate,
       notes: notes || 'Thank you for choosing Aqua Fishing Academy.',
       createdBy: req.user.id,
     });
 
     const populated = await Invoice.findById(invoice._id)
-      .populate('customer', 'fullName email phone')
+      .populate('customer', 'fullName email phone studentCode')
+      .populate('student', 'fullName email phone studentCode')
+      .populate('invoicedBy', 'fullName email role')
       .populate('program', 'title')
       .populate('branch', 'name');
 
     // Notify customer
-    await Notification.create({
-      recipient: customerId,
-      title: 'New Invoice Issued',
-      message: `Invoice ${invoiceNumber} for AED ${Number(totalAmount).toLocaleString()} has been generated for your account.`,
-      type: 'system',
-      link: '/finance/invoices',
-    });
+    try {
+      await Notification.create({
+        recipient: targetCustomerId,
+        title: 'New Invoice Issued',
+        message: `Invoice ${finalInvoiceNumber} for AED ${Number(totalAmount).toLocaleString()} has been generated for your account.`,
+        type: 'system',
+        link: '/finance/invoices',
+      });
+    } catch (notifErr) {
+      console.warn('Could not create invoice notification:', notifErr.message);
+    }
 
     res.status(201).json({
       success: true,
