@@ -177,6 +177,7 @@ exports.createCustomer = catchAsync(async (req, res, next) => {
 
   if (!studentUser) {
     const studentRole = await Role.findOne({ slug: 'student' });
+    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
     studentUser = await User.create({
       fullName: resolvedFullName,
       email: sEmail || undefined, // undefined prevents unique index collision
@@ -185,9 +186,9 @@ exports.createCustomer = catchAsync(async (req, res, next) => {
       branch: validatedBranchId,
       password: 'Student@12345',
       status: 'active',
+      studentCode,
+      isStudent: true,
     });
-
-    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
     await StudentProfile.create({
       user: studentUser._id,
       parentUser: parentUserId,

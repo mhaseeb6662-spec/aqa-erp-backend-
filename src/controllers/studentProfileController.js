@@ -175,11 +175,15 @@ exports.migrateStudents = async (req, res, next) => {
         continue;
       }
 
-      // Generate or normalize email if missing
-      const studentEmail = email || `student_${legacyId ? legacyId.toLowerCase().replace(/[^a-z0-9]/g, '') : Date.now() + '_' + i}@aquafishing.academy`;
+      // Normalize email if provided, otherwise leave undefined (no fake email)
+      const cleanEmail = (email || '').trim().toLowerCase();
+      const studentEmail = cleanEmail || undefined;
 
-      // Check Duplicate by Email or Legacy ID
-      const existingUser = await User.findOne({ email: studentEmail });
+      // Check Duplicate by Email (only if provided and registered to staff) or Legacy ID
+      let existingUser = null;
+      if (studentEmail) {
+        existingUser = await User.findOne({ email: studentEmail, isStudent: false });
+      }
       let existingProfile = null;
       if (legacyId) {
         existingProfile = await StudentProfile.findOne({ studentCode: legacyId });
@@ -190,9 +194,9 @@ exports.migrateStudents = async (req, res, next) => {
         summary.duplicates.push({
           row: rowNum,
           studentName: fullName,
-          email: studentEmail,
+          email: studentEmail || 'N/A',
           legacyId: legacyId || existingProfile?.studentCode,
-          reason: existingUser ? 'Email already registered' : 'Student Code already exists',
+          reason: existingUser ? 'Email already registered to staff account' : 'Student Code already exists',
         });
         continue;
       }
@@ -255,7 +259,10 @@ exports.migrateStudents = async (req, res, next) => {
         parentUserId = parentUser._id;
       }
 
-      // 2. Create Student User
+      // 2. Generate Student Code
+      const studentCode = legacyId || 'STU-' + Math.floor(100000 + Math.random() * 900000);
+
+      // 3. Create Student User
       const studentUser = await User.create({
         fullName,
         email: studentEmail,
@@ -263,10 +270,11 @@ exports.migrateStudents = async (req, res, next) => {
         role: studentRole?._id,
         branch: branchId,
         password: 'Student@12345',
+        studentCode,
+        isStudent: true,
       });
 
-      // 3. Create Student Profile
-      const studentCode = legacyId || 'STU-' + Math.floor(100000 + Math.random() * 900000);
+      // 4. Create Student Profile
       const studentProfile = await StudentProfile.create({
         user: studentUser._id,
         parentUser: parentUserId,

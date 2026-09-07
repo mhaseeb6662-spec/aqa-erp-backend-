@@ -34,18 +34,24 @@ exports.register = catchAsync(async (req, res, next) => {
     return next(new AppError('Default system role is not configured. Please contact support.', 500));
   }
 
+  let studentCode = null;
+  if (requestedRole === 'student') {
+    studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
+  }
+
   const user = await User.create({
     fullName,
-    email: String(email || '').trim().toLowerCase(),
+    email: String(email || '').trim().toLowerCase() || undefined,
     password,
     phone,
     role: roleObj._id,
+    studentCode,
+    isStudent: requestedRole === 'student',
   });
 
   // Auto-initialize profile based on role
   if (requestedRole === 'student') {
     const StudentProfile = require('../models/StudentProfile');
-    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
     await StudentProfile.create({ user: user._id, studentCode });
   } else if (requestedRole === 'parent') {
     const ParentProfile = require('../models/ParentProfile');
@@ -65,33 +71,65 @@ exports.register = catchAsync(async (req, res, next) => {
 
 /**
  * POST /api/v1/auth/login
- * Includes brute-force protection via progressive account locking.
+ * Supports email, Student ID (STU-XXXXXX), or phone, with brute-force protection.
  */
 exports.login = catchAsync(async (req, res, next) => {
-  const { email, password } = req.body;
-  let cleanEmail = String(email || '').trim().toLowerCase();
+  const { email, identifier: rawId, password } = req.body;
+  const loginInput = String(rawId || email || '').trim();
 
-  // If user types without dot 'digitalarabdev@gmail.com', map to 'digitalarab.dev@gmail.com'
-  if (cleanEmail === 'digitalarabdev@gmail.com') {
-    cleanEmail = 'digitalarab.dev@gmail.com';
+  let user = null;
+
+  // 1. If input contains '@', search by email (case-insensitive)
+  if (loginInput.includes('@')) {
+    let cleanEmail = loginInput.toLowerCase();
+    if (cleanEmail === 'digitalarabdev@gmail.com') {
+      cleanEmail = 'digitalarab.dev@gmail.com';
+    }
+    user = await User.findOne({ email: cleanEmail }).select('+password +loginAttempts +lockUntil').populate('role');
+  } else {
+    // 2. Try Student Code match directly on User model
+    user = await User.findOne({ studentCode: loginInput.toUpperCase() }).select('+password +loginAttempts +lockUntil').populate('role');
+
+    // If not found, try StudentProfile model lookup
+    if (!user) {
+      const StudentProfile = require('../models/StudentProfile');
+      const profile = await StudentProfile.findOne({ studentCode: loginInput.toUpperCase() });
+      if (profile && profile.user) {
+        user = await User.findById(profile.user).select('+password +loginAttempts +lockUntil').populate('role');
+      }
+    }
+
+    // 3. If still not found and input looks like a phone number
+    if (!user && loginInput.length >= 7) {
+      const cleanPhone = loginInput.replace(/[\s-]/g, '');
+      const candidates = await User.find({
+        $or: [{ phone: loginInput }, { phone: cleanPhone }],
+      }).select('+password +loginAttempts +lockUntil').populate('role');
+      if (candidates.length === 1) {
+        user = candidates[0];
+      }
+    }
+
+    // 4. Fallback: try email match even without '@'
+    if (!user) {
+      user = await User.findOne({ email: loginInput.toLowerCase() }).select('+password +loginAttempts +lockUntil').populate('role');
+    }
   }
 
-  const user = await User.findOne({ email: cleanEmail }).select('+password +loginAttempts +lockUntil').populate('role');
-
   if (!user) {
-    console.log(`[LOGIN FAILED] User not found for email: '${cleanEmail}'`);
-    return next(new AppError('Invalid email or password.', 401));
+    console.log(`[LOGIN FAILED] User not found for identifier: '${loginInput}'`);
+    return next(new AppError('Invalid email, Student ID, or password.', 401));
   }
 
   if (user.isLocked) {
-    console.log(`[LOGIN FAILED] User account is locked: '${cleanEmail}'`);
+    console.log(`[LOGIN FAILED] User account is locked: '${loginInput}'`);
     return next(
       new AppError('This account is temporarily locked due to multiple failed attempts. Try again later.', 423)
     );
   }
 
   const isMatch = await user.comparePassword(password);
-  console.log(`[LOGIN CHECK] Email: '${cleanEmail}', Password Length: ${password?.length}, isMatch: ${isMatch}`);
+  console.log(`[LOGIN CHECK] Identifier: '${loginInput}', Password Length: ${password?.length}, isMatch: ${isMatch}`);
 
   if (!isMatch) {
     user.loginAttempts = (user.loginAttempts || 0) + 1;
@@ -99,7 +137,7 @@ exports.login = catchAsync(async (req, res, next) => {
       user.lockUntil = Date.now() + LOCK_TIME_MINUTES * 60 * 1000;
     }
     await user.save({ validateBeforeSave: false });
-    return next(new AppError('Invalid email or password.', 401));
+    return next(new AppError('Invalid email, Student ID, or password.', 401));
   }
 
   if (user.status !== 'active') {

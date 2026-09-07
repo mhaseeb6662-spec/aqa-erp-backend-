@@ -18,7 +18,28 @@ router.post(
   requirePermission(PERMISSIONS.USERS_CREATE),
   [
     body('fullName').trim().notEmpty().withMessage('Full name is required.'),
-    body('email').optional({ checkFalsy: true }).isEmail().withMessage('A valid email is required if provided.').normalizeEmail(),
+    body('email').custom(async (value, { req }) => {
+      const Role = require('../models/Role');
+      let isStudent = false;
+      if (req.body.role) {
+        const roleDoc = await Role.findById(req.body.role).catch(() => null);
+        if (roleDoc && roleDoc.slug === 'student') {
+          isStudent = true;
+        }
+      }
+      const s = (value || '').trim();
+      if (!s) {
+        if (!isStudent) {
+          throw new Error('Email is required for staff and admin accounts.');
+        }
+        return true;
+      }
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(s)) {
+        throw new Error('Please provide a valid email address.');
+      }
+      return true;
+    }),
     body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters.'),
     body('role').notEmpty().withMessage('A role must be assigned.'),
   ],

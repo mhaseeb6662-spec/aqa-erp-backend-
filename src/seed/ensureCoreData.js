@@ -317,6 +317,49 @@ const ensureCoreData = async () => {
     console.log('[Seed] Default finance invoices & receipts created.');
   }
 
+  // Ensure User email index is partial unique and backfill isStudent and studentCode
+  try {
+    const userColl = User.collection;
+    const userIndexes = await userColl.indexes();
+    const oldEmailIdx = userIndexes.find((idx) => idx.name === 'email_1' && !idx.partialFilterExpression);
+    if (oldEmailIdx) {
+      console.log('[Seed] Dropping legacy non-sparse email_1 index from users collection...');
+      await userColl.dropIndex('email_1');
+      console.log('[Seed] Legacy email_1 index dropped.');
+    }
+
+    // Backfill isStudent on all users based on role
+    const studentRole = await Role.findOne({ slug: 'student' });
+    if (studentRole) {
+      await User.updateMany(
+        { role: studentRole._id, $or: [{ isStudent: { $exists: false } }, { isStudent: false }] },
+        { $set: { isStudent: true } }
+      );
+      await User.updateMany(
+        { role: { $ne: studentRole._id }, $or: [{ isStudent: { $exists: false } }, { isStudent: true }] },
+        { $set: { isStudent: false } }
+      );
+
+      // Backfill studentCode from StudentProfile onto User if missing
+      const StudentProfile = require('../models/StudentProfile');
+      const studentProfiles = await StudentProfile.find({ studentCode: { $exists: true, $ne: '' } });
+      for (const sp of studentProfiles) {
+        if (sp.user) {
+          await User.updateOne(
+            { _id: sp.user, $or: [{ studentCode: { $exists: false } }, { studentCode: null }] },
+            { $set: { studentCode: sp.studentCode, isStudent: true } }
+          );
+        }
+      }
+    }
+
+    // Re-ensure User indexes
+    await User.syncIndexes();
+    console.log('[Seed] User indexes synchronized successfully (partial unique email & studentCode).');
+  } catch (idxErr) {
+    console.warn('[Seed] Warning while synchronizing User indexes:', idxErr.message);
+  }
+
   return roleMap;
 };
 

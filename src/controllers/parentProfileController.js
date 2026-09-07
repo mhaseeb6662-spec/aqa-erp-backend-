@@ -111,11 +111,10 @@ exports.createChild = async (req, res, next) => {
 
     if (!fullName) return next(new AppError('Student full name is required', 400));
 
-    const studentEmail = email
-      ? email.toLowerCase().trim()
-      : `child.${Date.now()}.${Math.floor(Math.random() * 1000)}@aquafishing.academy`;
+    const studentEmail = email && email.trim() ? email.toLowerCase().trim() : undefined;
 
     const studentRole = await Role.findOne({ slug: 'student' });
+    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
 
     // Create User account for student
     const studentUser = await User.create({
@@ -123,9 +122,9 @@ exports.createChild = async (req, res, next) => {
       email: studentEmail,
       password: 'StudentTempPassword123!', // temporary default password
       role: studentRole._id,
+      studentCode,
+      isStudent: true,
     });
-
-    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
 
     const studentProfile = await StudentProfile.create({
       user: studentUser._id,

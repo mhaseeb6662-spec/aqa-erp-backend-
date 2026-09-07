@@ -155,22 +155,42 @@ class NotificationService {
       sentAt: new Date(),
     });
 
-    // 3. Dispatch Email Channel (if requested & recipient has email)
-    if (channels.includes('email') && recipient.email) {
-      try {
-        const emailRes = await EmailService.sendEmail({
-          to: recipient.email,
-          subject: title,
-          template: template.emailHtml || 'bookingConfirmation',
-          data: {
-            customerName: recipient.fullName,
-            ...variables,
-          },
-        });
-        notification.providerMessageId = emailRes.messageId;
-        await notification.save();
-      } catch (err) {
-        console.error(`[NotificationService] Email delivery failed for ${recipient.email}:`, err.message);
+    // 3. Dispatch Email Channel (if requested & recipient has email or linked parent has email)
+    if (channels.includes('email')) {
+      let targetEmail = recipient.email;
+      let targetName = recipient.fullName;
+
+      if (!targetEmail) {
+        try {
+          const StudentProfile = require('../models/StudentProfile');
+          const studentProfile = await StudentProfile.findOne({ user: recipient._id }).populate('parentUser');
+          if (studentProfile?.parentUser?.email) {
+            targetEmail = studentProfile.parentUser.email;
+            targetName = studentProfile.parentUser.fullName || recipient.fullName;
+          }
+        } catch (pErr) {
+          // ignore lookup error
+        }
+      }
+
+      if (targetEmail) {
+        try {
+          const emailRes = await EmailService.sendEmail({
+            to: targetEmail,
+            subject: title,
+            template: template.emailHtml || 'bookingConfirmation',
+            data: {
+              customerName: targetName,
+              ...variables,
+            },
+          });
+          notification.providerMessageId = emailRes.messageId;
+          await notification.save();
+        } catch (err) {
+          console.error(`[NotificationService] Email delivery failed for ${targetEmail}:`, err.message);
+        }
+      } else {
+        console.log(`[NotificationService] Email delivery skipped for ${recipient.fullName} (no email address).`);
       }
     }
 

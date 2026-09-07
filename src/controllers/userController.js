@@ -58,17 +58,55 @@ exports.getUserById = catchAsync(async (req, res, next) => {
  */
 exports.createUser = catchAsync(async (req, res, next) => {
   const { fullName, email, password, phone, role, branch, status } = req.body;
+  
+  const roleDoc = await Role.findById(role);
+  if (!roleDoc) return next(new AppError('Selected role does not exist.', 400));
+
+  const isStudent = roleDoc.slug === 'student';
   const sEmail = (email || '').trim().toLowerCase() || undefined;
 
+  // Non-student accounts (Admin, Coach, Staff) must have an email
+  if (!isStudent && !sEmail) {
+    return next(new AppError('Email is required for staff and admin accounts.', 400));
+  }
+
+  // Duplicate email check
   if (sEmail) {
-    const existing = await User.findOne({ email: sEmail });
-    if (existing) {
-      return next(new AppError('An account with this email already exists.', 409));
+    if (!isStudent) {
+      const existing = await User.findOne({ email: sEmail });
+      if (existing) {
+        return next(new AppError('An account with this email already exists.', 409));
+      }
+    } else {
+      // Students can share a family email with other students, but cannot hijack a staff email
+      const existingStaff = await User.findOne({ email: sEmail, isStudent: false });
+      if (existingStaff) {
+        return next(new AppError('This email is already associated with an administrative staff account.', 409));
+      }
     }
   }
 
-  const roleDoc = await Role.findById(role);
-  if (!roleDoc) return next(new AppError('Selected role does not exist.', 400));
+  let studentCode = null;
+  if (isStudent) {
+    studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
+  }
+
+  let branchId = null;
+  if (branch) {
+    const Branch = require('../models/Branch');
+    const mongoose = require('mongoose');
+    if (mongoose.Types.ObjectId.isValid(branch)) {
+      branchId = branch;
+    } else {
+      const bDoc = await Branch.findOne({
+        $or: [
+          { name: { $regex: new RegExp(`^${String(branch).trim()}$`, 'i') } },
+          { code: { $regex: new RegExp(`^${String(branch).trim()}$`, 'i') } },
+        ],
+      });
+      if (bDoc) branchId = bDoc._id;
+    }
+  }
 
   const user = await User.create({
     fullName,
@@ -76,18 +114,19 @@ exports.createUser = catchAsync(async (req, res, next) => {
     password,
     phone,
     role,
-    branch,
+    branch: branchId ? branchId.toString() : branch,
     status,
+    studentCode,
+    isStudent,
     createdBy: req.user._id,
   });
 
-  if (roleDoc.slug === 'student') {
+  if (isStudent) {
     const StudentProfile = require('../models/StudentProfile');
-    const studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
     await StudentProfile.create({
       user: user._id,
       studentCode,
-      primaryBranch: branch || null,
+      primaryBranch: branchId || null,
     });
   }
 
@@ -101,16 +140,37 @@ exports.createUser = catchAsync(async (req, res, next) => {
 exports.updateUser = catchAsync(async (req, res, next) => {
   const disallowed = ['password'];
   disallowed.forEach((field) => delete req.body[field]);
-  
+
+  const targetUser = await User.findById(req.params.id).populate('role');
+  if (!targetUser) return next(new AppError('User not found.', 404));
+
+  const isStudent = targetUser.role?.slug === 'student' || targetUser.isStudent;
+
+  const updateOps = { ...req.body };
+
   if (req.body.email !== undefined) {
     const sEmail = (req.body.email || '').trim().toLowerCase() || undefined;
-    req.body.email = sEmail;
-    
+
+    if (!isStudent && !sEmail) {
+      return next(new AppError('Email is required for staff and admin accounts.', 400));
+    }
+
     if (sEmail) {
-      const existing = await User.findOne({ email: sEmail, _id: { $ne: req.params.id } });
-      if (existing) {
-        return next(new AppError('An account with this email already exists.', 409));
+      if (!isStudent) {
+        const existing = await User.findOne({ email: sEmail, _id: { $ne: req.params.id } });
+        if (existing) {
+          return next(new AppError('An account with this email already exists.', 409));
+        }
+      } else {
+        const existingStaff = await User.findOne({ email: sEmail, isStudent: false, _id: { $ne: req.params.id } });
+        if (existingStaff) {
+          return next(new AppError('This email is already associated with an administrative staff account.', 409));
+        }
       }
+      updateOps.email = sEmail;
+    } else {
+      delete updateOps.email;
+      updateOps.$unset = { email: 1 };
     }
   }
 
@@ -119,7 +179,7 @@ exports.updateUser = catchAsync(async (req, res, next) => {
     if (!roleDoc) return next(new AppError('Selected role does not exist.', 400));
   }
 
-  const user = await User.findByIdAndUpdate(req.params.id, req.body, {
+  const user = await User.findByIdAndUpdate(req.params.id, updateOps, {
     new: true,
     runValidators: true,
   }).populate('role');

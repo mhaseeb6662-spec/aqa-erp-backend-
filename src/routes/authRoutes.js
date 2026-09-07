@@ -22,7 +22,7 @@ router.post(
 router.post(
   '/login',
   [
-    body('email').isEmail().withMessage('A valid email is required.').normalizeEmail(),
+    body('email').trim().notEmpty().withMessage('Email address or Student ID is required.'),
     body('password').notEmpty().withMessage('Password is required.'),
   ],
   validate,

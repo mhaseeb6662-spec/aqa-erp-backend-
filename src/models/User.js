@@ -12,12 +12,20 @@ const userSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      unique: true,
-      sparse: true,
       lowercase: true,
       trim: true,
       set: (v) => (v === '' ? undefined : v),
       match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address'],
+    },
+    studentCode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: null,
+    },
+    isStudent: {
+      type: Boolean,
+      default: false,
     },
     phone: {
       type: String,
@@ -91,6 +99,20 @@ const userSchema = new mongoose.Schema(
 );
 
 userSchema.index({ role: 1 });
+userSchema.index(
+  { email: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { email: { $type: 'string' }, isStudent: false },
+  }
+);
+userSchema.index(
+  { studentCode: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { studentCode: { $type: 'string' } },
+  }
+);
 
 // ---- Virtuals ----
 userSchema.virtual('isLocked').get(function isLocked() {
