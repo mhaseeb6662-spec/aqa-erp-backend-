@@ -14,5 +14,6 @@ router
   .post(documentController.uploadDocument);
 
 router.put('/:id/review', requirePermission(PERMISSIONS.PORTAL_DOCUMENTS_MANAGE), documentController.reviewDocument);
+router.get('/:id/file', documentController.getDocumentFile);
 
 module.exports = router;

@@ -23,39 +23,93 @@ const LOCK_TIME_MINUTES = 15;
 exports.register = catchAsync(async (req, res, next) => {
   const { fullName, email, password, phone, roleSlug } = req.body;
 
-  const existing = await User.findOne({ email: String(email || '').trim().toLowerCase() });
-  if (existing) {
-    return next(new AppError('An account with this email already exists.', 409));
-  }
-
   const requestedRole = ['student', 'parent'].includes(roleSlug) ? roleSlug : 'student';
   const roleObj = await Role.findOne({ slug: requestedRole });
   if (!roleObj) {
     return next(new AppError('Default system role is not configured. Please contact support.', 500));
   }
 
+  const isStudent = requestedRole === 'student';
+  const sEmail = (email || '').trim().toLowerCase() || undefined;
+
+  // Non-student accounts (parent, staff) must have an email
+  if (!isStudent && !sEmail) {
+    return next(new AppError('Email is required for parent accounts.', 400));
+  }
+
+  if (sEmail) {
+    if (!isStudent) {
+      const existing = await User.findOne({ email: sEmail, isStudent: false });
+      if (existing) {
+        return next(new AppError('An account with this email already exists.', 409));
+      }
+    } else {
+      // Students can share a family email with other students or parents, but not administrative staff
+      const existingStaff = await User.findOne({ email: sEmail, isStudent: false }).populate('role');
+      if (existingStaff && existingStaff.role?.slug !== 'parent') {
+        return next(new AppError('This email is already associated with an administrative staff account.', 409));
+      }
+    }
+  }
+
   let studentCode = null;
-  if (requestedRole === 'student') {
+  if (isStudent) {
     studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
   }
 
   const user = await User.create({
     fullName,
-    email: String(email || '').trim().toLowerCase() || undefined,
+    email: sEmail,
     password,
     phone,
     role: roleObj._id,
     studentCode,
-    isStudent: requestedRole === 'student',
+    isStudent,
   });
 
-  // Auto-initialize profile based on role
-  if (requestedRole === 'student') {
+  // Auto-initialize profile based on role & link parent/children
+  if (isStudent) {
     const StudentProfile = require('../models/StudentProfile');
-    await StudentProfile.create({ user: user._id, studentCode });
-  } else if (requestedRole === 'parent') {
     const ParentProfile = require('../models/ParentProfile');
-    await ParentProfile.create({ user: user._id, children: [] });
+
+    let parentUserId = null;
+    if (sEmail) {
+      const parentUser = await User.findOne({ email: sEmail, isStudent: false }).populate('role');
+      if (parentUser && parentUser.role?.slug === 'parent') {
+        parentUserId = parentUser._id;
+        await ParentProfile.findOneAndUpdate(
+          { user: parentUser._id },
+          { $addToSet: { children: user._id } },
+          { upsert: true }
+        );
+      }
+    }
+
+    await StudentProfile.create({
+      user: user._id,
+      studentCode,
+      parentUser: parentUserId,
+    });
+  } else if (requestedRole === 'parent') {
+    const StudentProfile = require('../models/StudentProfile');
+    const ParentProfile = require('../models/ParentProfile');
+
+    let initialChildren = [];
+    if (sEmail) {
+      const existingStudents = await User.find({ email: sEmail, isStudent: true });
+      if (existingStudents.length > 0) {
+        initialChildren = existingStudents.map((s) => s._id);
+        await StudentProfile.updateMany(
+          { user: { $in: initialChildren } },
+          { parentUser: user._id }
+        );
+      }
+    }
+
+    await ParentProfile.create({
+      user: user._id,
+      children: initialChildren,
+    });
   }
 
   const accessToken = generateAccessToken(user._id);
@@ -78,6 +132,7 @@ exports.login = catchAsync(async (req, res, next) => {
   const loginInput = String(rawId || email || '').trim();
 
   let user = null;
+  let isPasswordPreVerified = false;
 
   // 1. If input contains '@', search by email (case-insensitive)
   if (loginInput.includes('@')) {
@@ -85,17 +140,57 @@ exports.login = catchAsync(async (req, res, next) => {
     if (cleanEmail === 'digitalarabdev@gmail.com') {
       cleanEmail = 'digitalarab.dev@gmail.com';
     }
-    user = await User.findOne({ email: cleanEmail }).select('+password +loginAttempts +lockUntil').populate('role');
+    const candidates = await User.find({ email: cleanEmail })
+      .select('+password +loginAttempts +lockUntil')
+      .populate('role');
+
+    if (candidates.length === 0) {
+      console.log(`[LOGIN FAILED] User not found for email: '${cleanEmail}'`);
+      return next(new AppError('Invalid email, Student ID, or password.', 401));
+    }
+
+    if (candidates.length === 1) {
+      user = candidates[0];
+    } else {
+      // Multiple accounts share this email address
+      const matchedUsers = [];
+      for (const candidate of candidates) {
+        if (!candidate.isLocked) {
+          const match = await candidate.comparePassword(password);
+          if (match) {
+            matchedUsers.push(candidate);
+          }
+        }
+      }
+
+      if (matchedUsers.length === 1) {
+        user = matchedUsers[0];
+        isPasswordPreVerified = true;
+      } else if (matchedUsers.length > 1) {
+        return next(
+          new AppError(
+            'Multiple accounts share this email address and password. Please log in using your unique Student ID (STU-XXXXXX).',
+            409
+          )
+        );
+      } else {
+        return next(new AppError('Invalid email, Student ID, or password.', 401));
+      }
+    }
   } else {
     // 2. Try Student Code match directly on User model
-    user = await User.findOne({ studentCode: loginInput.toUpperCase() }).select('+password +loginAttempts +lockUntil').populate('role');
+    user = await User.findOne({ studentCode: loginInput.toUpperCase() })
+      .select('+password +loginAttempts +lockUntil')
+      .populate('role');
 
     // If not found, try StudentProfile model lookup
     if (!user) {
       const StudentProfile = require('../models/StudentProfile');
       const profile = await StudentProfile.findOne({ studentCode: loginInput.toUpperCase() });
       if (profile && profile.user) {
-        user = await User.findById(profile.user).select('+password +loginAttempts +lockUntil').populate('role');
+        user = await User.findById(profile.user)
+          .select('+password +loginAttempts +lockUntil')
+          .populate('role');
       }
     }
 
@@ -104,7 +199,9 @@ exports.login = catchAsync(async (req, res, next) => {
       const cleanPhone = loginInput.replace(/[\s-]/g, '');
       const candidates = await User.find({
         $or: [{ phone: loginInput }, { phone: cleanPhone }],
-      }).select('+password +loginAttempts +lockUntil').populate('role');
+      })
+        .select('+password +loginAttempts +lockUntil')
+        .populate('role');
       if (candidates.length === 1) {
         user = candidates[0];
       }
@@ -112,7 +209,35 @@ exports.login = catchAsync(async (req, res, next) => {
 
     // 4. Fallback: try email match even without '@'
     if (!user) {
-      user = await User.findOne({ email: loginInput.toLowerCase() }).select('+password +loginAttempts +lockUntil').populate('role');
+      const candidates = await User.find({ email: loginInput.toLowerCase() })
+        .select('+password +loginAttempts +lockUntil')
+        .populate('role');
+      if (candidates.length === 1) {
+        user = candidates[0];
+      } else if (candidates.length > 1) {
+        const matchedUsers = [];
+        for (const candidate of candidates) {
+          if (!candidate.isLocked) {
+            const match = await candidate.comparePassword(password);
+            if (match) {
+              matchedUsers.push(candidate);
+            }
+          }
+        }
+        if (matchedUsers.length === 1) {
+          user = matchedUsers[0];
+          isPasswordPreVerified = true;
+        } else if (matchedUsers.length > 1) {
+          return next(
+            new AppError(
+              'Multiple accounts share this email address and password. Please log in using your unique Student ID (STU-XXXXXX).',
+              409
+            )
+          );
+        } else {
+          return next(new AppError('Invalid email, Student ID, or password.', 401));
+        }
+      }
     }
   }
 
@@ -128,7 +253,10 @@ exports.login = catchAsync(async (req, res, next) => {
     );
   }
 
-  const isMatch = await user.comparePassword(password);
+  let isMatch = isPasswordPreVerified;
+  if (!isPasswordPreVerified) {
+    isMatch = await user.comparePassword(password);
+  }
   console.log(`[LOGIN CHECK] Identifier: '${loginInput}', Password Length: ${password?.length}, isMatch: ${isMatch}`);
 
   if (!isMatch) {

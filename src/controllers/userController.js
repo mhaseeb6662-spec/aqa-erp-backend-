@@ -73,14 +73,14 @@ exports.createUser = catchAsync(async (req, res, next) => {
   // Duplicate email check
   if (sEmail) {
     if (!isStudent) {
-      const existing = await User.findOne({ email: sEmail });
+      const existing = await User.findOne({ email: sEmail, isStudent: false });
       if (existing) {
         return next(new AppError('An account with this email already exists.', 409));
       }
     } else {
-      // Students can share a family email with other students, but cannot hijack a staff email
-      const existingStaff = await User.findOne({ email: sEmail, isStudent: false });
-      if (existingStaff) {
+      // Students can share a family email with other students or parents, but cannot hijack a staff email
+      const existingStaff = await User.findOne({ email: sEmail, isStudent: false }).populate('role');
+      if (existingStaff && existingStaff.role?.slug !== 'parent') {
         return next(new AppError('This email is already associated with an administrative staff account.', 409));
       }
     }
@@ -123,10 +123,26 @@ exports.createUser = catchAsync(async (req, res, next) => {
 
   if (isStudent) {
     const StudentProfile = require('../models/StudentProfile');
+    const ParentProfile = require('../models/ParentProfile');
+
+    let parentUserId = null;
+    if (sEmail) {
+      const parentUser = await User.findOne({ email: sEmail, isStudent: false }).populate('role');
+      if (parentUser && parentUser.role?.slug === 'parent') {
+        parentUserId = parentUser._id;
+        await ParentProfile.findOneAndUpdate(
+          { user: parentUser._id },
+          { $addToSet: { children: user._id } },
+          { upsert: true }
+        );
+      }
+    }
+
     await StudentProfile.create({
       user: user._id,
       studentCode,
       primaryBranch: branchId || null,
+      parentUser: parentUserId,
     });
   }
 
@@ -162,8 +178,8 @@ exports.updateUser = catchAsync(async (req, res, next) => {
           return next(new AppError('An account with this email already exists.', 409));
         }
       } else {
-        const existingStaff = await User.findOne({ email: sEmail, isStudent: false, _id: { $ne: req.params.id } });
-        if (existingStaff) {
+        const existingStaff = await User.findOne({ email: sEmail, isStudent: false, _id: { $ne: req.params.id } }).populate('role');
+        if (existingStaff && existingStaff.role?.slug !== 'parent') {
           return next(new AppError('This email is already associated with an administrative staff account.', 409));
         }
       }
@@ -185,6 +201,25 @@ exports.updateUser = catchAsync(async (req, res, next) => {
   }).populate('role');
 
   if (!user) return next(new AppError('User not found.', 404));
+
+  // Auto-link to parent if student updated with parent email
+  if (isStudent && req.body.email) {
+    const sEmail = (req.body.email || '').trim().toLowerCase();
+    const parentUser = await User.findOne({ email: sEmail, isStudent: false }).populate('role');
+    if (parentUser && parentUser.role?.slug === 'parent') {
+      const StudentProfile = require('../models/StudentProfile');
+      const ParentProfile = require('../models/ParentProfile');
+      await StudentProfile.findOneAndUpdate(
+        { user: user._id },
+        { parentUser: parentUser._id }
+      );
+      await ParentProfile.findOneAndUpdate(
+        { user: parentUser._id },
+        { $addToSet: { children: user._id } }
+      );
+    }
+  }
+
   return sendResponse(res, 200, 'User updated successfully.', user.toSafeObject());
 });
 

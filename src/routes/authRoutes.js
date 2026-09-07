@@ -10,7 +10,19 @@ router.post(
   '/register',
   [
     body('fullName').trim().notEmpty().withMessage('Full name is required.'),
-    body('email').isEmail().withMessage('A valid email is required.').normalizeEmail(),
+    body('email')
+      .optional({ checkFalsy: true })
+      .isEmail()
+      .withMessage('A valid email is required.')
+      .normalizeEmail(),
+    body('email').custom((value, { req }) => {
+      const roleSlug = (req.body.roleSlug || '').toLowerCase();
+      // If role is NOT student, email is mandatory
+      if (roleSlug !== 'student' && (!value || !value.trim())) {
+        throw new Error('Email is required for this account type.');
+      }
+      return true;
+    }),
     body('password')
       .isLength({ min: 8 })
       .withMessage('Password must be at least 8 characters long.'),

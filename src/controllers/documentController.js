@@ -137,3 +137,58 @@ exports.reviewDocument = async (req, res, next) => {
     next(err);
   }
 };
+
+// 4. Secure File Access / View Endpoint with RBAC
+exports.getDocumentFile = async (req, res, next) => {
+  try {
+    const doc = await Document.findById(req.params.id)
+      .populate('student', '_id fullName')
+      .populate('uploadedBy', '_id fullName');
+
+    if (!doc) {
+      return next(new AppError('Document not found', 404));
+    }
+
+    const isSuperAdmin = req.user.role?.slug === 'super-admin' || req.user.role?.slug === 'admin';
+    const canManageDocs =
+      req.user.role?.permissions?.includes('portal:documents:manage') ||
+      req.user.role?.permissions?.includes('operations:documents:view');
+
+    let hasAccess = isSuperAdmin || canManageDocs;
+
+    if (!hasAccess) {
+      if (doc.student && String(doc.student._id || doc.student) === String(req.user.id)) {
+        hasAccess = true;
+      } else if (doc.uploadedBy && String(doc.uploadedBy._id || doc.uploadedBy) === String(req.user.id)) {
+        hasAccess = true;
+      } else if (req.user.role?.slug === 'parent') {
+        const parentProf = await ParentProfile.findOne({ user: req.user.id });
+        const childrenIds = (parentProf?.children || []).map((c) => String(c._id || c));
+        if (doc.student && childrenIds.includes(String(doc.student._id || doc.student))) {
+          hasAccess = true;
+        }
+      }
+    }
+
+    if (!hasAccess) {
+      return next(new AppError('Access denied: You do not have permission to view this document.', 403));
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        id: doc._id,
+        title: doc.title,
+        documentType: doc.documentType,
+        mimeType: doc.mimeType,
+        fileSize: doc.fileSize,
+        fileUrl: doc.fileUrl,
+        status: doc.status,
+        createdAt: doc.createdAt,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+

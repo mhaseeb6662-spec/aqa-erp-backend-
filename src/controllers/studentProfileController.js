@@ -182,7 +182,10 @@ exports.migrateStudents = async (req, res, next) => {
       // Check Duplicate by Email (only if provided and registered to staff) or Legacy ID
       let existingUser = null;
       if (studentEmail) {
-        existingUser = await User.findOne({ email: studentEmail, isStudent: false });
+        existingUser = await User.findOne({ email: studentEmail, isStudent: false }).populate('role');
+        if (existingUser && existingUser.role?.slug === 'parent') {
+          existingUser = null;
+        }
       }
       let existingProfile = null;
       if (legacyId) {
