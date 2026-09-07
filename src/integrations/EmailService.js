@@ -88,59 +88,131 @@ class EmailService {
 
       case 'paymentReceipt':
         bodyContent = `
-          <h2 style="color: #0f172a; font-size: 20px; margin-top: 0;">Official Payment Receipt</h2>
-          <p style="font-size: 14px; color: #334155;">Dear <strong>${this.escapeHtml(data.recipientName || data.customerName)}</strong>,</p>
-          <p style="font-size: 14px; color: #334155;">Thank you for your payment to <strong>Aqua Fishing Academy</strong>. Your transaction has been successfully processed and verified.</p>
-          
-          <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; margin: 20px 0;">
-            <table style="width: 100%; font-size: 13px; color: #334155; border-collapse: collapse;">
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; max-width: 680px; margin: 0 auto; background: #ffffff; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <!-- Header -->
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px;">
+              <div>
+                <h1 style="font-size: 28px; font-weight: 800; color: #0f172a; margin: 0;">Receipt</h1>
+              </div>
+            </div>
+
+            <!-- Receipt Info -->
+            <table style="width: 100%; font-size: 13px; margin-bottom: 24px; border-collapse: collapse;">
               <tr>
-                <td style="padding: 5px 0; color: #64748b; width: 40%;"><strong>Receipt Number:</strong></td>
-                <td style="padding: 5px 0; font-family: monospace; font-weight: bold; color: #0f172a;">${this.escapeHtml(data.receiptNumber)}</td>
+                <td style="width: 140px; color: #475569; padding: 3px 0;">Receipt number</td>
+                <td style="font-weight: bold; color: #0f172a; padding: 3px 0;">${this.escapeHtml(data.receiptNumber)}</td>
               </tr>
               <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Invoice Reference:</strong></td>
-                <td style="padding: 5px 0; font-family: monospace; font-weight: bold; color: #0284c7;">${this.escapeHtml(data.invoiceNumber)}</td>
+                <td style="color: #475569; padding: 3px 0;">Invoice number</td>
+                <td style="font-weight: bold; color: #0f172a; padding: 3px 0;">${this.escapeHtml(data.invoiceNumber)}</td>
               </tr>
               <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Student Name:</strong></td>
-                <td style="padding: 5px 0; font-weight: bold; color: #0f172a;">${this.escapeHtml(data.studentName || data.customerName)}${data.studentCode ? ` (${this.escapeHtml(data.studentCode)})` : ''}</td>
-              </tr>
-              ${data.parentName && data.parentName !== data.studentName ? `
-              <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Parent / Guardian:</strong></td>
-                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.parentName)}</td>
-              </tr>` : ''}
-              <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Program / Class:</strong></td>
-                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.programTitle || 'Academy Training')}</td>
+                <td style="color: #475569; padding: 3px 0;">Date paid</td>
+                <td style="color: #0f172a; padding: 3px 0;">${this.escapeHtml(data.paymentDate || new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }))}</td>
               </tr>
               <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Branch Location:</strong></td>
-                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.branchName || 'Dubai Marina')}</td>
-              </tr>
-              <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Payment Method:</strong></td>
-                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.paymentMethod || 'Credit Card')}</td>
-              </tr>
-              <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Payment Date:</strong></td>
-                <td style="padding: 5px 0; color: #0f172a;">${this.escapeHtml(data.paymentDate || new Date().toLocaleDateString('en-AE'))}</td>
-              </tr>
-              <tr style="border-top: 1px solid #e2e8f0;">
-                <td style="padding: 10px 0 5px 0; color: #16a34a; font-size: 14px;"><strong>Amount Paid:</strong></td>
-                <td style="padding: 10px 0 5px 0; font-size: 16px; font-weight: 800; color: #16a34a;">AED ${Number(data.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-              </tr>
-              <tr>
-                <td style="padding: 5px 0; color: #64748b;"><strong>Remaining Balance Due:</strong></td>
-                <td style="padding: 5px 0; font-weight: bold; color: ${Number(data.balanceDue) > 0 ? '#d97706' : '#64748b'};">AED ${Number(data.balanceDue || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                <td style="color: #475569; padding: 3px 0;">Payment method</td>
+                <td style="font-weight: bold; color: #0f172a; padding: 3px 0;">${this.escapeHtml(data.paymentMethod || 'Total Pay')}</td>
               </tr>
             </table>
+
+            <!-- Bill From & Bill To -->
+            <table style="width: 100%; font-size: 12px; margin-bottom: 30px; border-collapse: collapse;">
+              <tr>
+                <td style="width: 50%; vertical-align: top; padding-right: 15px;">
+                  <div style="font-size: 10px; font-weight: bold; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;">BILL FROM</div>
+                  <div style="font-weight: bold; color: #0f172a; font-size: 13px;">Aqua Fishing Academy</div>
+                  <div style="color: #475569;">United Arab Emirates</div>
+                  <div style="color: #475569;">+971 56 990 5688</div>
+                  <div style="color: #475569;">info@aquafishingacademy.com</div>
+                  <div style="color: #475569;">aquafishingacademy.com/</div>
+                </td>
+                <td style="width: 50%; vertical-align: top; padding-left: 15px;">
+                  <div style="font-size: 10px; font-weight: bold; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;">BILL TO</div>
+                  <div style="font-weight: bold; color: #0f172a; font-size: 13px;">${this.escapeHtml(data.parentName || data.customerName || data.recipientName)}</div>
+                  ${data.customerPhone ? `<div style="color: #475569;">${this.escapeHtml(data.customerPhone)}</div>` : ''}
+                  ${data.customerEmail ? `<div style="color: #475569;">${this.escapeHtml(data.customerEmail)}</div>` : ''}
+                </td>
+              </tr>
+            </table>
+
+            <!-- Large Payment Summary -->
+            <div style="font-size: 22px; font-weight: 800; color: #0f172a; margin: 28px 0; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+              AED ${Number(data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Paid via ${this.escapeHtml(data.paymentMethod || 'Total Pay')} on ${this.escapeHtml(data.paymentDate || data.datePaid || new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }))}
+            </div>
+
+            <!-- Items Table -->
+            <table style="width: 100%; font-size: 12px; border-collapse: collapse; margin-bottom: 24px;">
+              <thead>
+                <tr style="border-bottom: 2px solid #334155; text-align: left; font-size: 11px; color: #475569; text-transform: uppercase;">
+                  <th style="padding: 8px 4px;">DESCRIPTION</th>
+                  <th style="padding: 8px 4px; text-align: center; width: 50px;">QTY</th>
+                  <th style="padding: 8px 4px; text-align: right; width: 100px;">UNIT PRICE</th>
+                  <th style="padding: 8px 4px; text-align: right; width: 90px;">DISCOUNT</th>
+                  <th style="padding: 8px 4px; text-align: right; width: 100px;">AMOUNT</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${Array.isArray(data.lineItems) && data.lineItems.length > 0 ? (
+                  data.lineItems.map(item => `
+                    <tr style="border-bottom: 1px solid #e2e8f0;">
+                      <td style="padding: 12px 4px; vertical-align: top;">
+                        <div style="font-weight: bold; color: #0f172a; font-size: 13px;">${this.escapeHtml(item.item || item.description || data.programTitle || 'Academy Maritime Session')}</div>
+                        ${item.description && item.item && item.description !== item.item ? `<div style="color: #475569; font-size: 11px; margin-top: 3px;">${this.escapeHtml(item.description)}</div>` : ''}
+                        ${item.validity ? `<div style="color: #475569; font-size: 11px; margin-top: 3px;"><strong>Validity</strong> ${this.escapeHtml(item.validity)}</div>` : ''}
+                      </td>
+                      <td style="padding: 12px 4px; text-align: center; vertical-align: top; color: #0f172a;">${item.quantity || 1}</td>
+                      <td style="padding: 12px 4px; text-align: right; vertical-align: top; color: #0f172a;">AED ${Number(item.unitPrice || item.amount || data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td style="padding: 12px 4px; text-align: right; vertical-align: top; color: #0f172a;">AED ${Number(item.discount?.amount || item.discount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td style="padding: 12px 4px; text-align: right; vertical-align: top; font-weight: bold; color: #0f172a;">AED ${Number(item.amount || data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    </tr>
+                  `).join('')
+                ) : `
+                  <tr style="border-bottom: 1px solid #e2e8f0;">
+                    <td style="padding: 12px 4px; vertical-align: top;">
+                      <div style="font-weight: bold; color: #0f172a; font-size: 13px;">${this.escapeHtml(data.programTitle || 'Academy Maritime Session')}</div>
+                      ${data.sessionDate ? `<div style="color: #475569; font-size: 11px; margin-top: 3px;">${this.escapeHtml(data.sessionDate)}</div>` : ''}
+                      ${data.validity ? `<div style="color: #475569; font-size: 11px; margin-top: 3px;"><strong>Validity</strong> ${this.escapeHtml(data.validity)}</div>` : ''}
+                    </td>
+                    <td style="padding: 12px 4px; text-align: center; vertical-align: top; color: #0f172a;">1</td>
+                    <td style="padding: 12px 4px; text-align: right; vertical-align: top; color: #0f172a;">AED ${Number(data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    <td style="padding: 12px 4px; text-align: right; vertical-align: top; color: #0f172a;">AED 0.00</td>
+                    <td style="padding: 12px 4px; text-align: right; vertical-align: top; font-weight: bold; color: #0f172a;">AED ${Number(data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                  </tr>
+                `}
+              </tbody>
+            </table>
+
+            <!-- Totals -->
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 24px;">
+              <table style="width: 260px; font-size: 12px; border-collapse: collapse; margin-left: auto;">
+                <tr style="border-top: 1px solid #475569;">
+                  <td style="padding: 6px 0; color: #475569;">Subtotal</td>
+                  <td style="padding: 6px 0; text-align: right; color: #0f172a;">AED ${Number(data.subtotal || data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 6px 0; color: #475569;">Rounded off</td>
+                  <td style="padding: 6px 0; text-align: right; color: #0f172a;">AED ${Number(data.roundingAdjustment || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                </tr>
+                <tr style="border-top: 1px solid #475569; border-bottom: 1px solid #475569;">
+                  <td style="padding: 6px 0; color: #0f172a;">Total</td>
+                  <td style="padding: 6px 0; text-align: right; color: #0f172a;">AED ${Number(data.totalAmount || data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 8px 0; font-weight: bold; color: #0f172a;">Paid</td>
+                  <td style="padding: 8px 0; text-align: right; font-weight: bold; color: #0f172a;">- AED ${Number(data.paidAmount || data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                </tr>
+              </table>
+            </div>
+
+            <!-- Payments -->
+            <div style="border-top: 1px solid #e2e8f0; padding-top: 16px;">
+              <div style="font-weight: bold; font-size: 13px; color: #0f172a; margin-bottom: 4px;">Payments</div>
+              <div style="font-size: 12px; color: #475569;">
+                AED ${Number(data.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} payment via ${this.escapeHtml(data.paymentMethod || 'Total Pay')} on ${this.escapeHtml(data.paymentDate || data.datePaid || new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }))}
+              </div>
+            </div>
           </div>
-          
-          <p style="font-size: 13px; color: #64748b; margin-top: 16px;">
-            This receipt serves as official proof of payment. You can also view and download your full invoices and payment receipts anytime via the <a href="${config.clientUrl || 'https://aquafishinghub.com'}/finance/receipts" style="color: #0284c7; font-weight: bold; text-decoration: none;">Aqua Fishing Academy Portal</a>.
-          </p>
         `;
         break;
 

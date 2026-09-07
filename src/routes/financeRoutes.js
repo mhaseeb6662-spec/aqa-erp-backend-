@@ -41,5 +41,6 @@ router
 
 // Receipts
 router.get('/receipts', requirePermission(PERMISSIONS.FINANCE_RECEIPTS_VIEW), financeController.getReceipts);
+router.get('/receipts/:id', requirePermission(PERMISSIONS.FINANCE_RECEIPTS_VIEW), financeController.getReceiptById);
 
 module.exports = router;

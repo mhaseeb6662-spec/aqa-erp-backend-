@@ -1236,12 +1236,55 @@ exports.getReceipts = async (req, res, next) => {
     }
 
     const receipts = await Receipt.find(filter)
-      .populate('customer', 'fullName email phone')
-      .populate('invoice', 'invoiceNumber totalAmount lineItems')
-      .populate('payment', 'transactionId gatewayReference cardLast4')
+      .populate('customer', 'fullName email phone studentCode')
+      .populate({
+        path: 'invoice',
+        select: 'invoiceNumber totalAmount subtotal discount coupon roundingAdjustment lineItems issuedDate dueDate student branch customer amountPaid balanceDue',
+        populate: [
+          { path: 'student', select: 'fullName email phone studentCode' },
+          { path: 'customer', select: 'fullName email phone' },
+          { path: 'branch', select: 'name city address' },
+        ],
+      })
+      .populate('payment', 'transactionId gatewayReference cardLast4 paymentMethod amount createdAt paidAt status provider approvalCode')
       .sort({ issuedAt: -1 });
 
     res.status(200).json({ success: true, count: receipts.length, data: receipts });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getReceiptById = async (req, res, next) => {
+  try {
+    const receipt = await Receipt.findById(req.params.id)
+      .populate('customer', 'fullName email phone studentCode')
+      .populate({
+        path: 'invoice',
+        select: 'invoiceNumber totalAmount subtotal discount coupon roundingAdjustment lineItems issuedDate dueDate student branch customer amountPaid balanceDue',
+        populate: [
+          { path: 'student', select: 'fullName email phone studentCode' },
+          { path: 'customer', select: 'fullName email phone' },
+          { path: 'branch', select: 'name city address' },
+        ],
+      })
+      .populate('payment', 'transactionId gatewayReference cardLast4 paymentMethod amount createdAt paidAt status provider approvalCode');
+
+    if (!receipt) {
+      return next(new AppError('Payment receipt not found', 404));
+    }
+
+    // RBAC check: Student/Parent can only view their own receipt
+    if (req.user.role?.slug === 'student' || req.user.role?.slug === 'parent') {
+      const isOwner =
+        String(receipt.customer?._id || receipt.customer) === String(req.user.id) ||
+        String(receipt.invoice?.student?._id || receipt.invoice?.student) === String(req.user.id);
+      if (!isOwner) {
+        return next(new AppError('You do not have permission to view this receipt', 403));
+      }
+    }
+
+    res.status(200).json({ success: true, data: receipt });
   } catch (err) {
     next(err);
   }
