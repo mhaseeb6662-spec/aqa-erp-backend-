@@ -149,7 +149,7 @@ exports.createBooking = async (req, res, next) => {
 
     const populated = await Booking.findById(booking._id)
       .populate('student', 'fullName email phone')
-      .populate('program', 'title category price level')
+      .populate('program', 'title category price level brochureUrl imageUrl')
       .populate('branch', 'name city address');
 
     res.status(201).json({
@@ -189,7 +189,7 @@ exports.getBookings = async (req, res, next) => {
 
     const bookings = await Booking.find(filter)
       .populate('student', 'fullName email phone')
-      .populate('program', 'title category price level code')
+      .populate('program', 'title category price level code brochureUrl imageUrl')
       .populate('branch', 'name code city address')
       .sort({ sessionDate: -1 });
 
