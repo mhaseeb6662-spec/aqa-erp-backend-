@@ -28,6 +28,12 @@ router.get('/payments', requirePermission(PERMISSIONS.FINANCE_PAYMENTS_VIEW), fi
 router.get('/payments/:id/evidence', requirePermission(PERMISSIONS.FINANCE_PAYMENTS_VIEW, PERMISSIONS.FINANCE_INVOICES_VIEW), financeController.getPaymentEvidence);
 
 // Refunds
+router.get(
+  '/refunds/eligible-transactions',
+  requirePermission(PERMISSIONS.FINANCE_REFUNDS_MANAGE, PERMISSIONS.FINANCE_PAYMENTS_VIEW),
+  financeController.getEligibleRefundTransactions
+);
+
 router
   .route('/refunds')
   .get(requirePermission(PERMISSIONS.FINANCE_REFUNDS_MANAGE, PERMISSIONS.FINANCE_PAYMENTS_VIEW), financeController.getRefunds)

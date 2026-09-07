@@ -558,7 +558,28 @@ exports.overrideInvoiceStatus = async (req, res, next) => {
 
     const oldStatus = invoice.status;
     invoice.status = status;
-    await invoice.save();
+    if (status === 'Paid' && invoice.balanceDue > 0) {
+      const payAmount = invoice.balanceDue;
+      invoice.amountPaid = invoice.totalAmount;
+      invoice.balanceDue = 0;
+      await invoice.save();
+
+      // Create recorded PaymentTransaction so it is auditable and refundable
+      await PaymentTransaction.create({
+        transactionId: 'TXN-ADM-' + Math.floor(100000 + Math.random() * 900000),
+        invoice: invoice._id,
+        customer: invoice.customer,
+        amount: payAmount,
+        paymentMethod: 'Bank Transfer',
+        approvalCode: 'ADMIN_OVERRIDE',
+        status: 'Completed',
+        notes: `Administrative payment recorded on status override to Paid. Reason: ${reason}`,
+        recordedBy: req.user.id,
+        paidAt: new Date(),
+      });
+    } else {
+      await invoice.save();
+    }
 
     // Audit the status override
     const Activity = require('../models/Activity');
@@ -638,6 +659,141 @@ exports.getPayments = async (req, res, next) => {
       .sort({ paidAt: -1 });
 
     res.status(200).json({ success: true, count: payments.length, data: payments });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ---- Eligible Refund Transactions ----
+exports.getEligibleRefundTransactions = async (req, res, next) => {
+  try {
+    const { search, branch, page = 1, limit = 50 } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+
+    // 1. Backfill any historical 'Paid' / 'Partially Paid' invoices that lack a PaymentTransaction
+    const paidInvoicesWithoutTxn = await Invoice.find({
+      status: { $in: ['Paid', 'Partially Paid'] },
+      amountPaid: { $gt: 0 },
+    }).lean();
+
+    for (const inv of paidInvoicesWithoutTxn) {
+      const exists = await PaymentTransaction.findOne({ invoice: inv._id });
+      if (!exists) {
+        await PaymentTransaction.create({
+          transactionId: 'TXN-REC-' + Math.floor(100000 + Math.random() * 900000),
+          invoice: inv._id,
+          customer: inv.customer,
+          amount: inv.amountPaid || inv.totalAmount,
+          paymentMethod: 'Bank Transfer',
+          status: 'Completed',
+          approvalCode: 'AUTO_RECONCILED',
+          notes: `Reconciled transaction for paid invoice ${inv.invoiceNumber}`,
+          paidAt: inv.updatedAt || inv.createdAt || new Date(),
+        });
+      }
+    }
+
+    // 2. Query eligible payment transactions
+    const paymentFilter = {
+      status: { $in: ['Completed', 'Partially Refunded', 'Succeeded', 'Settled'] },
+    };
+
+    if (req.user.role?.slug === 'student' || req.user.role?.slug === 'parent') {
+      paymentFilter.customer = req.user.id;
+    }
+
+    // Fetch payments sorted latest first
+    const payments = await PaymentTransaction.find(paymentFilter)
+      .populate('customer', 'fullName email phone')
+      .populate({
+        path: 'invoice',
+        select: 'invoiceNumber totalAmount amountPaid amountRefunded status branch student',
+        populate: {
+          path: 'student',
+          select: 'fullName email',
+        },
+      })
+      .sort({ paidAt: -1, createdAt: -1 });
+
+    // 3. Pre-fetch all processed refunds for these payments in one query
+    const paymentIds = payments.map((p) => p._id);
+    const allRefunds = await Refund.find({
+      payment: { $in: paymentIds },
+      status: 'Processed',
+    }).lean();
+
+    const refundMap = {};
+    for (const r of allRefunds) {
+      const pid = r.payment.toString();
+      refundMap[pid] = (refundMap[pid] || 0) + (r.amount || 0);
+    }
+
+    const eligibleList = [];
+
+    for (const p of payments) {
+      const alreadyRefunded = refundMap[p._id.toString()] || 0;
+      const remainingRefundable = Math.max(0, p.amount - alreadyRefunded);
+
+      // Skip fully refunded transactions
+      if (remainingRefundable <= 0) continue;
+
+      // Optional branch filter
+      if (branch && p.invoice?.branch && p.invoice.branch.toString() !== branch.toString()) {
+        continue;
+      }
+
+      const invNum = p.invoice?.invoiceNumber || 'N/A';
+      const custName = p.customer?.fullName || 'N/A';
+      const custEmail = p.customer?.email || '';
+      const stuName = p.invoice?.student?.fullName || custName;
+
+      // Search filter
+      if (search && search.trim()) {
+        const q = search.trim().toLowerCase();
+        const match =
+          p.transactionId.toLowerCase().includes(q) ||
+          invNum.toLowerCase().includes(q) ||
+          custName.toLowerCase().includes(q) ||
+          custEmail.toLowerCase().includes(q) ||
+          stuName.toLowerCase().includes(q);
+
+        if (!match) continue;
+      }
+
+      eligibleList.push({
+        id: p._id,
+        paymentId: p._id,
+        transactionId: p.transactionId,
+        invoiceId: p.invoice?._id || null,
+        invoiceNumber: invNum,
+        customerName: custName,
+        customerEmail: custEmail,
+        studentName: stuName,
+        paidAmount: p.amount,
+        refundedAmount: alreadyRefunded,
+        refundableAmount: remainingRefundable,
+        paymentMethod: p.paymentMethod,
+        provider: p.provider || 'Manual',
+        approvalCode: p.approvalCode || '',
+        status: p.status,
+        paidAt: p.paidAt || p.createdAt,
+        createdAt: p.createdAt,
+      });
+    }
+
+    const total = eligibleList.length;
+    const startIndex = (pageNum - 1) * limitNum;
+    const paginatedData = eligibleList.slice(startIndex, startIndex + limitNum);
+
+    res.status(200).json({
+      success: true,
+      count: paginatedData.length,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      data: paginatedData,
+    });
   } catch (err) {
     next(err);
   }
