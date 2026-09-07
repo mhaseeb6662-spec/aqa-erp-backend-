@@ -6,6 +6,7 @@ const userRoutes = require('./userRoutes');
 const roleRoutes = require('./roleRoutes');
 const branchRoutes = require('./branchRoutes');
 const programRoutes = require('./programRoutes');
+const programCategoryRoutes = require('./programCategoryRoutes');
 
 // CRM
 const leadRoutes = require('./leadRoutes');
@@ -41,6 +42,7 @@ router.use('/users', userRoutes);
 router.use('/roles', roleRoutes);
 router.use('/branches', branchRoutes);
 router.use('/programs', programRoutes);
+router.use('/program-categories', programCategoryRoutes);
 
 router.use('/leads', leadRoutes);
 router.use('/customers', customerRoutes);

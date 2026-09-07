@@ -1,5 +1,4 @@
 const express = require('express');
-const programController = require('../controllers/programController');
 const programCategoryController = require('../controllers/programCategoryController');
 const { protect } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/rbac');
@@ -9,38 +8,22 @@ const router = express.Router();
 
 router.use(protect);
 
-// Category Management (must be declared before /:id)
 router
-  .route('/categories')
+  .route('/')
   .get(programCategoryController.getCategories)
   .post(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programCategoryController.createCategory);
 
 router
-  .route('/categories/:id/dependencies')
+  .route('/:id/dependencies')
   .get(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programCategoryController.checkCategoryDependencies);
 
 router
-  .route('/categories/:id/archive')
+  .route('/:id/archive')
   .patch(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programCategoryController.archiveCategory);
 
 router
-  .route('/categories/:id')
+  .route('/:id')
   .put(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programCategoryController.updateCategory)
   .delete(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programCategoryController.deleteCategory);
-
-router
-  .route('/')
-  .get(programController.getPrograms)
-  .post(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.createProgram);
-
-router
-  .route('/:id')
-  .get(programController.getProgram)
-  .put(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.updateProgram)
-  .delete(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.deleteProgram);
-
-router
-  .route('/:id/dependencies')
-  .get(requirePermission(PERMISSIONS.PORTAL_PROGRAMS_MANAGE), programController.checkProgramDependencies);
 
 module.exports = router;
