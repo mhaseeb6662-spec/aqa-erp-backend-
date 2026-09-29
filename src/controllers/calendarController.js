@@ -11,7 +11,7 @@ const Invoice = require('../models/Invoice');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
 const sendResponse = require('../utils/apiResponse');
-const { syncCalendarEventToSchedule, removeCalendarEventSchedule } = require('../utils/syncCalendarSchedule');
+const { syncCalendarEventToSchedule, removeCalendarEventSchedule, combineDateAndTime } = require('../utils/syncCalendarSchedule');
 
 function addMinutesToTime(timeStr, minutes) {
   if (!timeStr || !timeStr.includes(':')) return '';
@@ -494,8 +494,64 @@ exports.getLocationOptions = catchAsync(async (req, res) => {
  * GET /api/v1/calendar/:id
  */
 exports.getCalendarEvent = catchAsync(async (req, res, next) => {
-  const event = await CalendarEvent.findById(req.params.id).populate(POPULATE_FIELDS);
-  if (!event) return next(new AppError('Calendar event not found.', 404));
+  const { id } = req.params;
+  let event = await CalendarEvent.findById(id).populate(POPULATE_FIELDS);
+
+  if (!event) {
+    const sch = await Schedule.findById(id)
+      .populate('program branch instructor student participants booking')
+      .lean();
+    if (!sch) return next(new AppError('Calendar event not found.', 404));
+
+    const sDate = new Date(sch.startTime);
+    const eDate = sch.endTime ? new Date(sch.endTime) : new Date(sDate.getTime() + 2 * 3600 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    const startStr = `${pad(sDate.getHours())}:${pad(sDate.getMinutes())}`;
+    const endStr = `${pad(eDate.getHours())}:${pad(eDate.getMinutes())}`;
+
+    const initialRegs = [];
+    if (sch.student) {
+      initialRegs.push({
+        _id: sch.student._id || sch.student,
+        kind: 'enrolled',
+        student: sch.student,
+        attendance: sch.attendance?.toLowerCase() || 'pending',
+        paymentStatus: 'No Invoice',
+      });
+    }
+    if (Array.isArray(sch.participants)) {
+      sch.participants.forEach((p) => {
+        initialRegs.push({
+          _id: p._id || p,
+          kind: 'enrolled',
+          student: p,
+          attendance: 'pending',
+          paymentStatus: 'No Invoice',
+        });
+      });
+    }
+
+    event = {
+      _id: sch._id,
+      type: sch.sessionType ? sch.sessionType.toLowerCase() : 'class',
+      eventType: 'one-time',
+      subject: sch.program?.category || sch.program?.title || 'Fishing Essentials',
+      title: sch.title,
+      program: sch.program,
+      branch: sch.branch,
+      date: sDate,
+      startTime: startStr,
+      endTime: endStr,
+      teacher: sch.instructor || null,
+      teachers: sch.instructor ? [sch.instructor] : [],
+      location: sch.location || sch.branch?.name || '',
+      seatType: 'limited',
+      capacity: sch.maxCapacity || 10,
+      status: sch.status === 'Completed' ? 'completed' : sch.status === 'Cancelled' ? 'cancelled' : 'scheduled',
+      registrations: initialRegs,
+      isScheduleModel: true,
+    };
+  }
 
   const [enriched] = await enrichEventsWithFinancials([event]);
   return sendResponse(res, 200, 'Calendar event fetched successfully.', enriched || event);
@@ -718,7 +774,52 @@ exports.updateCalendarEvent = catchAsync(async (req, res, next) => {
   }
 
   const existingEvent = await CalendarEvent.findById(req.params.id);
-  if (!existingEvent) return next(new AppError('Calendar event not found.', 404));
+  if (!existingEvent) {
+    const existingSchedule = await Schedule.findById(req.params.id);
+    if (!existingSchedule) return next(new AppError('Calendar event not found.', 404));
+
+    const scheduleStatusMap = {
+      scheduled: 'Scheduled',
+      completed: 'Completed',
+      cancelled: 'Cancelled',
+      no_show: 'No Show',
+    };
+
+    const updateFields = {};
+    if (req.body.title) updateFields.title = req.body.title;
+    if (req.body.capacity) updateFields.maxCapacity = Number(req.body.capacity);
+    if (req.body.teacher) updateFields.instructor = req.body.teacher;
+    if (req.body.teachers && req.body.teachers.length > 0) {
+      updateFields.instructor = req.body.teachers[0];
+      if (req.body.teachers.length > 1) updateFields.assistantCoach = req.body.teachers[1];
+      if (req.body.teachers.length > 2) updateFields.supportStaff = req.body.teachers.slice(2);
+    }
+    if (req.body.program) updateFields.program = req.body.program;
+    if (req.body.branch) updateFields.branch = req.body.branch;
+    if (req.body.location) updateFields.location = req.body.location;
+    if (req.body.notes || req.body.internalNotes) updateFields.notes = req.body.notes || req.body.internalNotes;
+    if (req.body.status) {
+      updateFields.status = scheduleStatusMap[req.body.status] || 'Scheduled';
+    }
+    if (req.body.boat || req.body.vessel) updateFields.vessel = req.body.boat || req.body.vessel;
+
+    if (req.body.date || req.body.startTime || req.body.endTime) {
+      const baseDate = req.body.date ? parseUtcDate(req.body.date) : existingSchedule.startTime;
+      const sTime = req.body.startTime || '09:00';
+      const eTime = req.body.endTime || '10:00';
+      updateFields.startTime = combineDateAndTime(baseDate, sTime);
+      updateFields.endTime = combineDateAndTime(baseDate, eTime);
+    }
+
+    const updatedSch = await Schedule.findByIdAndUpdate(req.params.id, updateFields, { new: true })
+      .populate('program branch instructor student participants booking');
+
+    if (existingSchedule.calendarEvent) {
+      await CalendarEvent.findByIdAndUpdate(existingSchedule.calendarEvent, req.body);
+    }
+
+    return sendResponse(res, 200, 'Calendar event updated.', updatedSch);
+  }
 
   if (req.body.venue !== undefined) {
     const normVenue = String(req.body.venue).toLowerCase() === 'boat' ? 'Boat' : 'Classroom';
@@ -812,23 +913,67 @@ exports.updateCalendarEventStatus = catchAsync(async (req, res, next) => {
     return next(new AppError('Invalid status.', 400));
   }
 
-  const event = await CalendarEvent.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate(
+  let event = await CalendarEvent.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate(
     POPULATE_FIELDS
   );
 
-  if (!event) return next(new AppError('Calendar event not found.', 404));
-  await syncCalendarEventToSchedule(event);
-  return sendResponse(res, 200, 'Calendar event status updated.', event);
+  if (event) {
+    await syncCalendarEventToSchedule(event);
+    return sendResponse(res, 200, 'Calendar event status updated.', event);
+  }
+
+  const scheduleStatusMap = {
+    scheduled: 'Scheduled',
+    completed: 'Completed',
+    cancelled: 'Cancelled',
+    no_show: 'No Show',
+  };
+
+  const schedule = await Schedule.findByIdAndUpdate(
+    req.params.id,
+    { status: scheduleStatusMap[status] || 'Scheduled' },
+    { new: true }
+  ).populate('program branch instructor student participants booking');
+
+  if (schedule) {
+    if (schedule.calendarEvent) {
+      await CalendarEvent.findByIdAndUpdate(schedule.calendarEvent, { status });
+    }
+    return sendResponse(res, 200, 'Calendar event status updated.', schedule);
+  }
+
+  return next(new AppError('Calendar event not found.', 404));
 });
 
 /**
  * DELETE /api/v1/calendar/:id
  */
 exports.deleteCalendarEvent = catchAsync(async (req, res, next) => {
-  const event = await CalendarEvent.findByIdAndDelete(req.params.id);
-  if (!event) return next(new AppError('Calendar event not found.', 404));
-  await removeCalendarEventSchedule(req.params.id);
-  return sendResponse(res, 200, 'Calendar event removed.');
+  const { id } = req.params;
+
+  // 1. Try finding and deleting from CalendarEvent
+  const event = await CalendarEvent.findByIdAndDelete(id);
+  if (event) {
+    await removeCalendarEventSchedule(id);
+    return sendResponse(res, 200, 'Calendar event removed.');
+  }
+
+  // 2. Try finding and deleting from Schedule
+  const schedule = await Schedule.findByIdAndDelete(id);
+  if (schedule) {
+    if (schedule.calendarEvent) {
+      await CalendarEvent.findByIdAndDelete(schedule.calendarEvent);
+    }
+    return sendResponse(res, 200, 'Calendar event removed.');
+  }
+
+  // 3. Check if any Schedule references this id as calendarEvent
+  const schByCal = await Schedule.findOneAndDelete({ calendarEvent: id });
+  if (schByCal) {
+    return sendResponse(res, 200, 'Calendar event removed.');
+  }
+
+  return next(new AppError('Calendar event not found.', 404));
 });
 
 /**
@@ -843,8 +988,23 @@ exports.addRegistration = catchAsync(async (req, res, next) => {
   if (!studentId && !leadId) return next(new AppError('Select a student or a lead to add.', 400));
   if (studentId && leadId) return next(new AppError('Select only one of student or lead.', 400));
 
-  const event = await CalendarEvent.findById(req.params.id);
-  if (!event) return next(new AppError('Calendar event not found.', 404));
+  let event = await CalendarEvent.findById(req.params.id);
+  if (!event) {
+    const sch = await Schedule.findById(req.params.id);
+    if (!sch) return next(new AppError('Calendar event not found.', 404));
+
+    if (studentId) {
+      if (!Array.isArray(sch.participants)) sch.participants = [];
+      const alreadyOn =
+        (sch.student && String(sch.student) === String(studentId)) ||
+        sch.participants.some((p) => String(p) === String(studentId));
+      if (alreadyOn) return next(new AppError('This person is already on this event.', 400));
+      sch.participants.push(studentId);
+      if (!sch.student) sch.student = studentId;
+      await sch.save();
+    }
+    return sendResponse(res, 201, 'Added to the event.', sch);
+  }
 
   if (event.seatType === 'limited' && event.capacity && event.registrations.length >= event.capacity) {
     return next(new AppError(`Event capacity reached (${event.capacity} seats max).`, 400));
@@ -884,8 +1044,20 @@ exports.addRegistration = catchAsync(async (req, res, next) => {
  * DELETE /api/v1/calendar/:id/registrations/:regId
  */
 exports.removeRegistration = catchAsync(async (req, res, next) => {
-  const event = await CalendarEvent.findById(req.params.id);
-  if (!event) return next(new AppError('Calendar event not found.', 404));
+  let event = await CalendarEvent.findById(req.params.id);
+  if (!event) {
+    const sch = await Schedule.findById(req.params.id);
+    if (!sch) return next(new AppError('Calendar event not found.', 404));
+
+    if (sch.student && String(sch.student) === String(req.params.regId)) {
+      sch.student = null;
+    }
+    if (Array.isArray(sch.participants)) {
+      sch.participants = sch.participants.filter((p) => String(p) !== String(req.params.regId));
+    }
+    await sch.save();
+    return sendResponse(res, 200, 'Removed from the event.', sch);
+  }
 
   const registration = event.registrations.id(req.params.regId);
   if (!registration) return next(new AppError('Registration not found.', 404));
@@ -907,8 +1079,16 @@ exports.updateRegistrationAttendance = catchAsync(async (req, res, next) => {
     return next(new AppError('Invalid attendance value.', 400));
   }
 
-  const event = await CalendarEvent.findById(req.params.id);
-  if (!event) return next(new AppError('Calendar event not found.', 404));
+  let event = await CalendarEvent.findById(req.params.id);
+  if (!event) {
+    const sch = await Schedule.findById(req.params.id);
+    if (!sch) return next(new AppError('Calendar event not found.', 404));
+
+    const attMap = { pending: 'Pending', present: 'Present', absent: 'Absent' };
+    sch.attendance = attMap[attendance] || 'Pending';
+    await sch.save();
+    return sendResponse(res, 200, 'Attendance updated.', sch);
+  }
 
   const registration = event.registrations.id(req.params.regId);
   if (!registration) return next(new AppError('Registration not found.', 404));
@@ -930,8 +1110,12 @@ exports.updateRegistrationPaymentStatus = catchAsync(async (req, res, next) => {
     return next(new AppError('Invalid payment status value.', 400));
   }
 
-  const event = await CalendarEvent.findById(req.params.id);
-  if (!event) return next(new AppError('Calendar event not found.', 404));
+  let event = await CalendarEvent.findById(req.params.id);
+  if (!event) {
+    const sch = await Schedule.findById(req.params.id);
+    if (!sch) return next(new AppError('Calendar event not found.', 404));
+    return sendResponse(res, 200, 'Payment status updated.', sch);
+  }
 
   const registration = event.registrations.id(req.params.regId);
   if (!registration) return next(new AppError('Registration not found.', 404));
