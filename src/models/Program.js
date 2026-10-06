@@ -11,6 +11,7 @@ const programSchema = new mongoose.Schema(
       type: String,
       uppercase: true,
       trim: true,
+      sparse: true,
     },
     category: {
       type: String,
@@ -80,6 +81,8 @@ const programSchema = new mongoose.Schema(
     },
     calendarColor: {
       type: String,
+      lowercase: true,
+      trim: true,
       enum: ['blue', 'teal', 'emerald', 'rose', 'amber', 'purple', 'indigo', 'red', 'green', 'orange', 'yellow', 'pink'],
       default: 'blue',
     },

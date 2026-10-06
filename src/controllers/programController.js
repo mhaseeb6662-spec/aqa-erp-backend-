@@ -55,13 +55,43 @@ exports.getProgram = async (req, res, next) => {
 // Create program (Admin)
 exports.createProgram = async (req, res, next) => {
   try {
-    const allowedColors = ['red', 'blue', 'green', 'orange', 'yellow', 'pink', 'purple'];
-    if (req.body.calendarColor && !allowedColors.includes(req.body.calendarColor.toLowerCase())) {
-      return next(new AppError('Invalid program colour. Allowed: red, blue, green, orange, yellow, pink, purple', 400));
+    const allowedColors = ['blue', 'teal', 'emerald', 'rose', 'amber', 'purple', 'indigo', 'red', 'green', 'orange', 'yellow', 'pink'];
+    if (req.body.calendarColor) {
+      const colorLower = req.body.calendarColor.trim().toLowerCase();
+      if (!allowedColors.includes(colorLower)) {
+        return next(new AppError('Invalid program colour. Allowed: red, blue, green, orange, yellow, pink, purple', 400));
+      }
+      req.body.calendarColor = colorLower;
+    } else {
+      req.body.calendarColor = 'blue';
     }
-    if (req.body.durationHours) {
+
+    // Auto-generate unique program code if not provided
+    if (!req.body.code || !req.body.code.trim()) {
+      const baseSlug = (req.body.title || 'PROG')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 8);
+      let candidateCode = `PROG-${baseSlug || 'CLASS'}`;
+      const codeExists = await Program.exists({ code: candidateCode });
+      if (codeExists) {
+        candidateCode = `PROG-${baseSlug || 'CLASS'}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+      }
+      req.body.code = candidateCode;
+    } else {
+      req.body.code = req.body.code.trim().toUpperCase();
+    }
+
+    if (req.body.durationHours !== undefined) {
       req.body.durationMinutes = Math.round(Number(req.body.durationHours) * 60);
     }
+
+    if (req.body.brochureUrl && !req.body.imageUrl) {
+      req.body.imageUrl = req.body.brochureUrl;
+    } else if (req.body.imageUrl && !req.body.brochureUrl) {
+      req.body.brochureUrl = req.body.imageUrl;
+    }
+
     if (req.body.branches && req.body.branches.length > 0) {
       const valid = await validateBranches(req.body.branches);
       if (!valid) {
@@ -93,14 +123,28 @@ exports.updateProgram = async (req, res, next) => {
     if (!oldProgram) return next(new AppError('Program not found', 404));
 
     if (req.body.calendarColor) {
-      const allowedColors = ['red', 'blue', 'green', 'orange', 'yellow', 'pink', 'purple'];
-      if (!allowedColors.includes(req.body.calendarColor.toLowerCase())) {
+      const allowedColors = ['blue', 'teal', 'emerald', 'rose', 'amber', 'purple', 'indigo', 'red', 'green', 'orange', 'yellow', 'pink'];
+      const colorLower = req.body.calendarColor.trim().toLowerCase();
+      if (!allowedColors.includes(colorLower)) {
         return next(new AppError('Invalid program colour. Allowed: red, blue, green, orange, yellow, pink, purple', 400));
       }
+      req.body.calendarColor = colorLower;
     }
-    if (req.body.durationHours) {
+
+    if (req.body.code) {
+      req.body.code = req.body.code.trim().toUpperCase();
+    }
+
+    if (req.body.durationHours !== undefined) {
       req.body.durationMinutes = Math.round(Number(req.body.durationHours) * 60);
     }
+
+    if (req.body.brochureUrl && !req.body.imageUrl) {
+      req.body.imageUrl = req.body.brochureUrl;
+    } else if (req.body.imageUrl && !req.body.brochureUrl) {
+      req.body.brochureUrl = req.body.imageUrl;
+    }
+
     if (req.body.branches && req.body.branches.length > 0) {
       const valid = await validateBranches(req.body.branches);
       if (!valid) {
