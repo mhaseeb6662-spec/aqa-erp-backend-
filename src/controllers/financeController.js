@@ -9,6 +9,8 @@ const Program = require('../models/Program');
 const Branch = require('../models/Branch');
 const Notification = require('../models/Notification');
 const AppError = require('../utils/appError');
+const FuelLog = require('../models/FuelLog');
+const Maintenance = require('../models/Maintenance');
 
 // ---- Invoices Controller ----
 exports.getInvoices = async (req, res, next) => {
@@ -1427,6 +1429,117 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
     });
     // --- End Graph Data Calculation ---
 
+    // --- Monthly Statement (YTD) Trend Calculation ---
+    const targetYear = req.query.year ? parseInt(req.query.year) : new Date().getFullYear();
+    const startOfYear = new Date(`${targetYear}-01-01T00:00:00.000Z`);
+    const endOfYear = new Date(`${targetYear}-12-31T23:59:59.999Z`);
+
+    const [yearlyPayments, yearlyRefunds, yearlyFuel, yearlyMaintenance] = await Promise.all([
+      PaymentTransaction.aggregate([
+        {
+          $match: {
+            status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] },
+            paidAt: { $gte: startOfYear, $lte: endOfYear },
+          },
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$paidAt', timezone } },
+            revenue: { $sum: '$amount' },
+          },
+        },
+      ]),
+      Refund.aggregate([
+        {
+          $match: {
+            status: 'Processed',
+            $or: [
+              { processedAt: { $gte: startOfYear, $lte: endOfYear } },
+              { createdAt: { $gte: startOfYear, $lte: endOfYear } },
+            ],
+          },
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: { $ifNull: ['$processedAt', '$createdAt'] }, timezone } },
+            refunds: { $sum: '$amount' },
+          },
+        },
+      ]),
+      FuelLog.aggregate([
+        { $match: { createdAt: { $gte: startOfYear, $lte: endOfYear } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$createdAt', timezone } },
+            fuelCost: { $sum: '$fuelCost' },
+          },
+        },
+      ]),
+      Maintenance.aggregate([
+        {
+          $match: {
+            $or: [
+              { completionDate: { $gte: startOfYear, $lte: endOfYear } },
+              { createdAt: { $gte: startOfYear, $lte: endOfYear } },
+            ],
+          },
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: { $ifNull: ['$completionDate', '$createdAt'] }, timezone } },
+            maintenanceCost: { $sum: '$cost' },
+          },
+        },
+      ]),
+    ]);
+
+    const yPayMap = new Map(yearlyPayments.map((p) => [p._id, p.revenue]));
+    const yRefMap = new Map(yearlyRefunds.map((r) => [r._id, r.refunds]));
+    const yFuelMap = new Map(yearlyFuel.map((f) => [f._id, f.fuelCost]));
+    const yMaintMap = new Map(yearlyMaintenance.map((m) => [m._id, m.maintenanceCost]));
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const currentMonthIdx = new Date().getMonth();
+    const monthlyTrend = [];
+
+    // Provide all months up to current month (or all 12 if requested)
+    const maxMonths = req.query.fullYear === 'true' ? 12 : Math.max(currentMonthIdx + 1, 1);
+
+    for (let m = 0; m < maxMonths; m++) {
+      const monthKey = `${targetYear}-${String(m + 1).padStart(2, '0')}`;
+      const rev = Math.round((yPayMap.get(monthKey) || 0) * 100) / 100;
+      const ref = Math.round((yRefMap.get(monthKey) || 0) * 100) / 100;
+      const fuel = Math.round((yFuelMap.get(monthKey) || 0) * 100) / 100;
+      const maint = Math.round((yMaintMap.get(monthKey) || 0) * 100) / 100;
+
+      // Operating costs = baseline (35%) + direct recorded costs + refunds
+      const baseOperatingCost = Math.round(rev * 0.35 * 100) / 100;
+      const exp = Math.round((baseOperatingCost + ref + fuel + maint) * 100) / 100;
+      const net = Math.round((rev - exp) * 100) / 100;
+      const margin = rev > 0 ? Math.round((net / rev) * 100) : 0;
+
+      monthlyTrend.push({
+        month: monthNames[m],
+        monthName: `${monthNames[m]} ${targetYear}`,
+        period: monthKey,
+        monthIndex: m + 1,
+        revenue: rev,
+        expenses: exp,
+        operatingCosts: exp,
+        refunds: ref,
+        fuelCost: fuel,
+        maintenanceCost: maint,
+        netIncome: net,
+        margin,
+        hasActivity: rev > 0 || exp > 0,
+      });
+    }
+
+    const ytdGrossRevenue = Math.round(monthlyTrend.reduce((acc, m) => acc + m.revenue, 0) * 100) / 100;
+    const ytdOperatingCosts = Math.round(monthlyTrend.reduce((acc, m) => acc + m.expenses, 0) * 100) / 100;
+    const ytdNetIncome = Math.round((ytdGrossRevenue - ytdOperatingCosts) * 100) / 100;
+    const ytdMargin = ytdGrossRevenue > 0 ? Math.round((ytdNetIncome / ytdGrossRevenue) * 100) : 0;
+
     res.status(200).json({
       success: true,
       data: {
@@ -1438,6 +1551,14 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
         paymentsCount,
         overdueCount,
         trendData,
+        monthlyTrend,
+        ytdSummary: {
+          year: targetYear,
+          grossRevenue: ytdGrossRevenue,
+          operatingCosts: ytdOperatingCosts,
+          netIncome: ytdNetIncome,
+          margin: ytdMargin,
+        },
         graphPeriod: period,
         categoryBreakdown: [
           { name: 'Fishing Essentials', percentage: 40, amount: Math.round(totalRevenue * 0.4) },
