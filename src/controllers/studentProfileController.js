@@ -157,161 +157,250 @@ exports.migrateStudents = async (req, res, next) => {
       duplicates: [],
     };
 
+    // Helper to find value from row using multiple potential column aliases
+    const getVal = (row, ...keys) => {
+      for (const k of keys) {
+        if (row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== '') {
+          return String(row[k]).trim();
+        }
+        // Also check case-insensitive match
+        const foundKey = Object.keys(row).find(
+          (rk) => rk.toLowerCase().replace(/[\s_-]/g, '') === k.toLowerCase().replace(/[\s_-]/g, '')
+        );
+        if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && String(row[foundKey]).trim() !== '') {
+          return String(row[foundKey]).trim();
+        }
+      }
+      return '';
+    };
+
     for (let i = 0; i < students.length; i++) {
       const row = students[i];
       const rowNum = i + 1;
-      const fullName = (row.fullName || row.studentName || row.name || '').trim();
-      const email = (row.email || row.studentEmail || '').trim().toLowerCase();
-      const phone = (row.phone || row.studentPhone || '').trim();
-      const legacyId = (row.legacyStudentId || row.studentCode || row.studentId || '').trim();
-      const parentName = (row.parentName || row.guardianName || '').trim();
-      const parentEmail = (row.parentEmail || row.guardianEmail || '').trim().toLowerCase();
-      const parentPhone = (row.parentPhone || row.guardianPhone || '').trim();
 
-      // Basic Validation
-      if (!fullName) {
-        summary.rejectedCount++;
-        summary.errors.push({ row: rowNum, error: 'Missing Student Name', data: row });
-        continue;
-      }
+      try {
+        const fullName = getVal(row, 'fullName', 'studentName', 'name', 'full_name', 'student_name', 'Student Name', 'Name');
+        const email = getVal(row, 'email', 'studentEmail', 'student_email', 'Student Email', 'Email').toLowerCase();
+        const phone = getVal(row, 'phone', 'studentPhone', 'student_phone', 'Student Phone', 'Phone', 'Mobile', 'contact');
+        const legacyId = getVal(row, 'legacyStudentId', 'studentCode', 'studentId', 'student_code', 'student_id', 'Student Code', 'Student ID', 'Legacy ID', 'id');
+        const parentName = getVal(row, 'parentName', 'guardianName', 'parent_name', 'guardian_name', 'Parent Name', 'Father Name', 'Guardian');
+        const parentEmail = getVal(row, 'parentEmail', 'guardianEmail', 'parent_email', 'guardian_email', 'Parent Email', 'Guardian Email').toLowerCase();
+        const parentPhone = getVal(row, 'parentPhone', 'guardianPhone', 'parent_phone', 'guardian_phone', 'Parent Phone', 'Guardian Phone');
+        const dobRaw = getVal(row, 'dateOfBirth', 'dob', 'date_of_birth', 'Date of Birth', 'DOB', 'Birth Date');
+        const genderRaw = getVal(row, 'gender', 'sex', 'Gender', 'Sex');
+        const skillRaw = getVal(row, 'skillLevel', 'level', 'skill_level', 'Skill Level', 'Level', 'Rank');
+        const branchRaw = getVal(row, 'branch', 'branchName', 'branch_name', 'Branch', 'Branch Name', 'Location', 'City');
+        const progRaw = getVal(row, 'program', 'programName', 'program_name', 'Program', 'Program Name', 'Course');
+        const emergencyName = getVal(row, 'emergencyContactName', 'emergency_contact_name', 'emergencyName', 'Emergency Contact', 'Emergency Name');
+        const emergencyPhone = getVal(row, 'emergencyContactPhone', 'emergency_contact_phone', 'emergencyPhone', 'Emergency Phone', 'Emergency Contact Phone');
+        const medicalNotes = getVal(row, 'medicalNotes', 'medical_notes', 'Medical Notes', 'Medical', 'Allergies');
 
-      // Normalize email if provided, otherwise leave undefined (no fake email)
-      const cleanEmail = (email || '').trim().toLowerCase();
-      const studentEmail = cleanEmail || undefined;
-
-      // Check Duplicate by Email (only if provided and registered to staff) or Legacy ID
-      let existingUser = null;
-      if (studentEmail) {
-        existingUser = await User.findOne({ email: studentEmail, isStudent: false }).populate('role');
-        if (existingUser && existingUser.role?.slug === 'parent') {
-          existingUser = null;
+        // 1. Basic Validation: Must have at least a student name
+        if (!fullName) {
+          summary.rejectedCount++;
+          summary.errors.push({ row: rowNum, error: 'Missing Student Name', data: row });
+          continue;
         }
-      }
-      let existingProfile = null;
-      if (legacyId) {
-        existingProfile = await StudentProfile.findOne({ studentCode: legacyId });
-      }
 
-      if (existingUser || existingProfile) {
-        summary.duplicateCount++;
-        summary.duplicates.push({
-          row: rowNum,
-          studentName: fullName,
-          email: studentEmail || 'N/A',
-          legacyId: legacyId || existingProfile?.studentCode,
-          reason: existingUser ? 'Email already registered to staff account' : 'Student Code already exists',
-        });
-        continue;
-      }
+        const studentEmail = email || undefined;
 
-      // Branch Mapping
-      let branchId = defaultBranch?._id;
-      if (row.branch || row.branchName) {
-        const queryBranch = String(row.branch || row.branchName).toLowerCase();
-        const matched = allBranches.find(
-          (b) => b.name.toLowerCase().includes(queryBranch) || b.city?.toLowerCase().includes(queryBranch) || (b.code && b.code.toLowerCase() === queryBranch)
-        );
-        if (matched) branchId = matched._id;
-      }
+        // 2. Check Duplicates by Student Code
+        let existingProfile = null;
+        if (legacyId) {
+          existingProfile = await StudentProfile.findOne({ studentCode: legacyId });
+        }
 
-      // Program Mapping
-      const enrolledProgramIds = [];
-      if (row.program || row.programName || row.enrolledProgram) {
-        const queryProg = String(row.program || row.programName || row.enrolledProgram).toLowerCase();
-        const matchedProg = allPrograms.find(
-          (p) => p.title.toLowerCase().includes(queryProg) || (p.code && p.code.toLowerCase() === queryProg)
-        );
-        if (matchedProg) enrolledProgramIds.push(matchedProg._id);
-      }
+        // Also check if student with exact same name and phone already exists
+        if (!existingProfile && phone) {
+          const userMatch = await User.findOne({ fullName, phone, isStudent: true });
+          if (userMatch) {
+            existingProfile = await StudentProfile.findOne({ user: userMatch._id });
+          }
+        }
 
-      summary.validCount++;
+        // Check if email belongs to staff
+        let staffEmailConflict = false;
+        if (studentEmail) {
+          const staffUser = await User.findOne({ email: studentEmail, isStudent: false }).populate('role');
+          if (staffUser && staffUser.role?.slug !== 'parent') {
+            staffEmailConflict = true;
+          }
+        }
 
-      // If dry run, do not write to database
-      if (dryRun) {
-        if (summary.importedSamples.length < 5) {
-          summary.importedSamples.push({
+        if (existingProfile || staffEmailConflict) {
+          summary.duplicateCount++;
+          summary.duplicates.push({
             row: rowNum,
-            fullName,
-            email: studentEmail,
-            studentCode: legacyId || 'AUTO-GENERATED',
-            parentName: parentName || 'N/A',
-            branch: branchId,
+            studentName: fullName,
+            email: studentEmail || 'N/A',
+            legacyId: legacyId || existingProfile?.studentCode,
+            reason: staffEmailConflict ? 'Email belongs to active staff account' : 'Student already exists in system',
           });
+          continue;
         }
-        continue;
-      }
 
-      // 1. Resolve or Create Parent
-      let parentUserId = null;
-      if (parentEmail) {
-        let parentUser = await User.findOne({ email: parentEmail });
-        if (!parentUser) {
-          parentUser = await User.create({
-            fullName: parentName || `${fullName}'s Parent`,
-            email: parentEmail,
-            phone: parentPhone || '',
-            role: parentRole?._id,
-            branch: branchId,
-            password: 'Password@12345',
-          });
-          await ParentProfile.create({
-            user: parentUser._id,
-            children: [],
-          });
+        // 3. Branch Mapping
+        let branchId = defaultBranch?._id;
+        if (branchRaw) {
+          const qBranch = branchRaw.toLowerCase();
+          const matched = allBranches.find(
+            (b) =>
+              b.name?.toLowerCase().includes(qBranch) ||
+              b.city?.toLowerCase().includes(qBranch) ||
+              (b.code && b.code.toLowerCase() === qBranch) ||
+              String(b._id) === branchRaw
+          );
+          if (matched) branchId = matched._id;
         }
-        parentUserId = parentUser._id;
-      }
 
-      // 2. Generate Student Code
-      const studentCode = legacyId || 'STU-' + Math.floor(100000 + Math.random() * 900000);
+        // 4. Program Mapping
+        const enrolledProgramIds = [];
+        if (progRaw) {
+          const qProg = progRaw.toLowerCase();
+          const matchedProg = allPrograms.find(
+            (p) =>
+              p.title?.toLowerCase().includes(qProg) ||
+              (p.code && p.code.toLowerCase() === qProg) ||
+              String(p._id) === progRaw
+          );
+          if (matchedProg) enrolledProgramIds.push(matchedProg._id);
+        }
 
-      // 3. Create Student User
-      const studentUser = await User.create({
-        fullName,
-        email: studentEmail,
-        phone: phone || '',
-        role: studentRole?._id,
-        branch: branchId,
-        password: 'Student@12345',
-        studentCode,
-        isStudent: true,
-      });
+        summary.validCount++;
 
-      // 4. Create Student Profile
-      const studentProfile = await StudentProfile.create({
-        user: studentUser._id,
-        parentUser: parentUserId,
-        studentCode,
-        dateOfBirth: row.dateOfBirth ? new Date(row.dateOfBirth) : null,
-        gender: row.gender && ['Male', 'Female', 'Other'].includes(row.gender) ? row.gender : 'Prefer not to say',
-        skillLevel: row.skillLevel && ['Beginner', 'Intermediate', 'Advanced', 'Master'].includes(row.skillLevel) ? row.skillLevel : 'Beginner',
-        primaryBranch: branchId,
-        enrolledPrograms: enrolledProgramIds,
-        emergencyContact: {
-          name: row.emergencyContactName || parentName || '',
-          phone: row.emergencyContactPhone || parentPhone || phone || '',
-          relationship: row.emergencyRelationship || 'Parent/Guardian',
-        },
-        medicalNotes: row.medicalNotes || 'No known restrictions.',
-        dietaryNotes: row.dietaryNotes || 'Standard diet.',
-      });
+        // If dry run, do not write to database
+        if (dryRun) {
+          if (summary.importedSamples.length < 5) {
+            summary.importedSamples.push({
+              row: rowNum,
+              fullName,
+              email: studentEmail,
+              studentCode: legacyId || 'AUTO-GENERATED',
+              parentName: parentName || 'N/A',
+              branch: branchId,
+            });
+          }
+          continue;
+        }
 
-      // Link child to parent
-      if (parentUserId) {
-        await ParentProfile.findOneAndUpdate(
-          { user: parentUserId },
-          { $addToSet: { children: studentUser._id } }
-        );
-      }
+        // 5. Parent Resolution or Creation
+        let parentUserId = null;
+        if (parentEmail || parentPhone) {
+          let parentUser = null;
+          if (parentEmail) {
+            parentUser = await User.findOne({ email: parentEmail });
+          }
+          if (!parentUser && parentPhone) {
+            parentUser = await User.findOne({ phone: parentPhone, isStudent: false });
+          }
 
-      summary.importedCount++;
-      if (summary.importedSamples.length < 5) {
-        summary.importedSamples.push({
-          id: studentProfile._id,
-          studentCode,
+          if (!parentUser) {
+            parentUser = await User.create({
+              fullName: parentName || `${fullName}'s Parent`,
+              email: parentEmail || undefined,
+              phone: parentPhone || '',
+              role: parentRole?._id,
+              branch: branchId,
+              password: 'Password@12345',
+            });
+            await ParentProfile.create({
+              user: parentUser._id,
+              children: [],
+            });
+          }
+          parentUserId = parentUser._id;
+        }
+
+        // 6. Generate Clean Student Code
+        let studentCode = legacyId;
+        if (!studentCode) {
+          let isUnique = false;
+          while (!isUnique) {
+            studentCode = 'STU-' + Math.floor(100000 + Math.random() * 900000);
+            const exists = await StudentProfile.findOne({ studentCode });
+            if (!exists) isUnique = true;
+          }
+        }
+
+        // 7. Parse Gender & Skill Level
+        let gender = 'Prefer not to say';
+        if (genderRaw) {
+          const gLow = genderRaw.toLowerCase();
+          if (gLow.startsWith('m') || gLow === 'boy') gender = 'Male';
+          else if (gLow.startsWith('f') || gLow === 'girl') gender = 'Female';
+          else if (['Male', 'Female', 'Other', 'Prefer not to say'].includes(genderRaw)) gender = genderRaw;
+        }
+
+        let skillLevel = 'Beginner';
+        if (skillRaw) {
+          const sLow = skillRaw.toLowerCase();
+          if (sLow.includes('inter')) skillLevel = 'Intermediate';
+          else if (sLow.includes('adv')) skillLevel = 'Advanced';
+          else if (sLow.includes('mas')) skillLevel = 'Master';
+          else if (['Beginner', 'Intermediate', 'Advanced', 'Master'].includes(skillRaw)) skillLevel = skillRaw;
+        }
+
+        let parsedDob = null;
+        if (dobRaw) {
+          const d = new Date(dobRaw);
+          if (!isNaN(d.getTime())) parsedDob = d;
+        }
+
+        // 8. Create Student User
+        const studentUser = await User.create({
           fullName,
           email: studentEmail,
-          parentLinked: Boolean(parentUserId),
+          phone: phone || '',
+          role: studentRole?._id,
+          branch: branchId,
+          password: 'Student@12345',
+          studentCode,
+          isStudent: true,
+        });
+
+        // 9. Create Student Profile
+        const studentProfile = await StudentProfile.create({
+          user: studentUser._id,
+          parentUser: parentUserId,
+          studentCode,
+          dateOfBirth: parsedDob,
+          gender,
+          skillLevel,
+          primaryBranch: branchId,
+          enrolledPrograms: enrolledProgramIds,
+          emergencyContact: {
+            name: emergencyName || parentName || '',
+            phone: emergencyPhone || parentPhone || phone || '',
+            relationship: 'Parent/Guardian',
+          },
+          medicalNotes: medicalNotes || 'No known allergies or medical restrictions.',
+          dietaryNotes: 'Standard diet.',
+        });
+
+        // 10. Link child to parent profile
+        if (parentUserId) {
+          await ParentProfile.findOneAndUpdate(
+            { user: parentUserId },
+            { $addToSet: { children: studentUser._id } }
+          );
+        }
+
+        summary.importedCount++;
+        if (summary.importedSamples.length < 5) {
+          summary.importedSamples.push({
+            id: studentProfile._id,
+            studentCode,
+            fullName,
+            email: studentEmail,
+            parentLinked: Boolean(parentUserId),
+          });
+        }
+      } catch (rowErr) {
+        summary.rejectedCount++;
+        summary.errors.push({
+          row: rowNum,
+          studentName: row.fullName || row.name || 'Unknown',
+          error: rowErr.message || 'Validation or database error',
         });
       }
     }

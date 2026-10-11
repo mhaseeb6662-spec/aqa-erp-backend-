@@ -1434,17 +1434,23 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
     const startOfYear = new Date(`${targetYear}-01-01T00:00:00.000Z`);
     const endOfYear = new Date(`${targetYear}-12-31T23:59:59.999Z`);
 
-    const [yearlyPayments, yearlyRefunds, yearlyFuel, yearlyMaintenance] = await Promise.all([
+    // Optional branch filter
+    const branchFilter = req.query.branch ? { branch: req.query.branch } : {};
+
+    const [yearlyPayments, yearlyRefunds, yearlyFuel, yearlyMaintenance, allPrograms, invoiceProgramAgg, paymentMethodAgg, vatAgg] = await Promise.all([
       PaymentTransaction.aggregate([
         {
           $match: {
             status: { $in: ['Completed', 'Partially Refunded', 'Refunded'] },
-            paidAt: { $gte: startOfYear, $lte: endOfYear },
+            $or: [
+              { paidAt: { $gte: startOfYear, $lte: endOfYear } },
+              { createdAt: { $gte: startOfYear, $lte: endOfYear } },
+            ],
           },
         },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m', date: '$paidAt', timezone } },
+            _id: { $dateToString: { format: '%Y-%m', date: { $ifNull: ['$paidAt', '$createdAt'] }, timezone } },
             revenue: { $sum: '$amount' },
           },
         },
@@ -1491,6 +1497,58 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
           },
         },
       ]),
+      Program.find({ status: { $ne: 'archived' } }).lean(),
+      Invoice.aggregate([
+        {
+          $match: {
+            ...branchFilter,
+            createdAt: { $gte: startOfYear, $lte: endOfYear },
+          },
+        },
+        {
+          $group: {
+            _id: '$program',
+            invoicedAmount: { $sum: '$totalAmount' },
+            collectedAmount: { $sum: '$amountPaid' },
+            invoicesCount: { $sum: 1 },
+          },
+        },
+      ]),
+      PaymentTransaction.aggregate([
+        {
+          $match: {
+            status: 'Completed',
+            $or: [
+              { paidAt: { $gte: startOfYear, $lte: endOfYear } },
+              { createdAt: { $gte: startOfYear, $lte: endOfYear } },
+            ],
+          },
+        },
+        {
+          $group: {
+            _id: { $ifNull: ['$paymentMethod', 'Other'] },
+            totalAmount: { $sum: '$amount' },
+            transactionCount: { $sum: 1 },
+          },
+        },
+      ]),
+      Invoice.aggregate([
+        {
+          $match: {
+            ...branchFilter,
+            createdAt: { $gte: startOfYear, $lte: endOfYear },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalGross: { $sum: '$totalAmount' },
+            totalTaxable: { $sum: '$subtotal' },
+            totalVat: { $sum: '$taxAmount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
 
     const yPayMap = new Map(yearlyPayments.map((p) => [p._id, p.revenue]));
@@ -1502,8 +1560,8 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
     const currentMonthIdx = new Date().getMonth();
     const monthlyTrend = [];
 
-    // Provide all months up to current month (or all 12 if requested)
-    const maxMonths = req.query.fullYear === 'true' ? 12 : Math.max(currentMonthIdx + 1, 1);
+    // Provide full year by default so executive statements show all 12 months cleanly
+    const maxMonths = 12;
 
     for (let m = 0; m < maxMonths; m++) {
       const monthKey = `${targetYear}-${String(m + 1).padStart(2, '0')}`;
@@ -1517,6 +1575,7 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
       const exp = Math.round((baseOperatingCost + ref + fuel + maint) * 100) / 100;
       const net = Math.round((rev - exp) * 100) / 100;
       const margin = rev > 0 ? Math.round((net / rev) * 100) : 0;
+      const vatAmount = Math.round(rev * 0.05 * 100) / 100;
 
       monthlyTrend.push({
         month: monthNames[m],
@@ -1531,14 +1590,66 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
         maintenanceCost: maint,
         netIncome: net,
         margin,
+        vatAmount,
         hasActivity: rev > 0 || exp > 0,
       });
     }
 
     const ytdGrossRevenue = Math.round(monthlyTrend.reduce((acc, m) => acc + m.revenue, 0) * 100) / 100;
     const ytdOperatingCosts = Math.round(monthlyTrend.reduce((acc, m) => acc + m.expenses, 0) * 100) / 100;
+    const ytdFuelCost = Math.round(monthlyTrend.reduce((acc, m) => acc + m.fuelCost, 0) * 100) / 100;
+    const ytdMaintCost = Math.round(monthlyTrend.reduce((acc, m) => acc + m.maintenanceCost, 0) * 100) / 100;
+    const ytdRefunds = Math.round(monthlyTrend.reduce((acc, m) => acc + m.refunds, 0) * 100) / 100;
     const ytdNetIncome = Math.round((ytdGrossRevenue - ytdOperatingCosts) * 100) / 100;
     const ytdMargin = ytdGrossRevenue > 0 ? Math.round((ytdNetIncome / ytdGrossRevenue) * 100) : 0;
+    const ytdVatCollected = Math.round(monthlyTrend.reduce((acc, m) => acc + m.vatAmount, 0) * 100) / 100;
+
+    // Real Program Revenue Breakdown
+    const invProgMap = new Map(invoiceProgramAgg.map((ip) => [String(ip._id), ip]));
+    const totalProgInvoiced = invoiceProgramAgg.reduce((acc, ip) => acc + ip.invoicedAmount, 0);
+
+    const programRevenueBreakdown = allPrograms.map((prog) => {
+      const agg = invProgMap.get(String(prog._id)) || { invoicedAmount: 0, collectedAmount: 0, invoicesCount: 0 };
+      const pct = totalProgInvoiced > 0 ? Math.round((agg.invoicedAmount / totalProgInvoiced) * 100) : 0;
+      return {
+        id: prog._id,
+        name: prog.title,
+        code: prog.code || '',
+        price: prog.price || 0,
+        invoicedAmount: agg.invoicedAmount,
+        collectedAmount: agg.collectedAmount,
+        invoicesCount: agg.invoicesCount,
+        percentage: pct,
+      };
+    });
+
+    // Real Payment Method Breakdown
+    const totalPaymentCollected = paymentMethodAgg.reduce((acc, pm) => acc + pm.totalAmount, 0);
+    const paymentMethodBreakdown = paymentMethodAgg.map((pm) => ({
+      method: pm._id,
+      amount: pm.totalAmount,
+      count: pm.transactionCount,
+      percentage: totalPaymentCollected > 0 ? Math.round((pm.totalAmount / totalPaymentCollected) * 100) : 0,
+    }));
+
+    // Tax / VAT Statement (UAE FTA 5% Compliance)
+    const vatSummary = {
+      grossRevenue: vatAgg[0]?.totalGross || ytdGrossRevenue,
+      taxableSubtotal: vatAgg[0]?.totalTaxable || Math.round(ytdGrossRevenue * 0.95238 * 100) / 100,
+      vatCollected: vatAgg[0]?.totalVat || ytdVatCollected,
+      invoicesCount: vatAgg[0]?.count || 0,
+      standardRate: '5.0%',
+      country: 'United Arab Emirates',
+    };
+
+    // Operating Cost Breakdown Summary
+    const costBreakdown = {
+      fuelTotal: ytdFuelCost,
+      maintenanceTotal: ytdMaintCost,
+      refundsTotal: ytdRefunds,
+      baseOperationsTotal: Math.round(ytdGrossRevenue * 0.35 * 100) / 100,
+      totalOperatingCosts: ytdOperatingCosts,
+    };
 
     res.status(200).json({
       success: true,
@@ -1558,14 +1669,21 @@ exports.getFinancialDashboardMetrics = async (req, res, next) => {
           operatingCosts: ytdOperatingCosts,
           netIncome: ytdNetIncome,
           margin: ytdMargin,
+          vatCollected: ytdVatCollected,
+          fuelCost: ytdFuelCost,
+          maintenanceCost: ytdMaintCost,
+          refunds: ytdRefunds,
         },
+        programRevenueBreakdown,
+        paymentMethodBreakdown,
+        vatSummary,
+        costBreakdown,
         graphPeriod: period,
-        categoryBreakdown: [
-          { name: 'Fishing Essentials', percentage: 40, amount: Math.round(totalRevenue * 0.4) },
-          { name: 'Offshore & Deep Sea', percentage: 30, amount: Math.round(totalRevenue * 0.3) },
-          { name: 'Kayak & Boating', percentage: 15, amount: Math.round(totalRevenue * 0.15) },
-          { name: 'Junior Angler', percentage: 15, amount: Math.round(totalRevenue * 0.15) },
-        ],
+        categoryBreakdown: programRevenueBreakdown.map((p) => ({
+          name: p.name,
+          percentage: p.percentage,
+          amount: p.invoicedAmount,
+        })),
       },
     });
   } catch (err) {
